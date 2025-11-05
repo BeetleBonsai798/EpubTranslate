@@ -664,7 +664,7 @@ class TranslationWorker(QObject):
                 # print(messages_for_provider)
 
                 try:
-                    print(messages_for_provider)
+                    # print(messages_for_provider)
                     # Build request parameters
                     request_params = {
                         'model': self.model,
