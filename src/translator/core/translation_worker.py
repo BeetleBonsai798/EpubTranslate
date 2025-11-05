@@ -5,7 +5,7 @@ import re
 import json
 import queue
 import pypandoc
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 from openai import OpenAI
 from bs4 import BeautifulSoup
 
@@ -28,15 +28,15 @@ from ..utils.token_counter import num_tokens_from_string, split_chapter
 class TranslationWorker(QObject):
     """Worker thread for translating chapters."""
 
-    update_progress = pyqtSignal(str, int, str)
-    finished = pyqtSignal(int)
-    characters_updated = pyqtSignal()
-    places_updated = pyqtSignal()
-    terms_updated = pyqtSignal()
-    notes_updated = pyqtSignal()
-    raw_json_updated = pyqtSignal(str)
-    status_updated = pyqtSignal(int, int, int, int)
-    chapter_completed = pyqtSignal(int)
+    update_progress = Signal(str, int, str)
+    finished = Signal(int)
+    characters_updated = Signal()
+    places_updated = Signal()
+    terms_updated = Signal()
+    notes_updated = Signal()
+    raw_json_updated = Signal(str)
+    status_updated = Signal(int, int, int, int)
+    chapter_completed = Signal(int)
 
     def __init__(self, output_folder, model, max_tokens_per_chunk,
                  send_previous, previous_chapters, send_previous_chunks, worker_id,

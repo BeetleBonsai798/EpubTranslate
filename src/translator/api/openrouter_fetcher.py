@@ -3,17 +3,17 @@
 import json
 import requests
 import urllib.parse
-from PyQt5.QtCore import QThread, pyqtSignal
+from PySide6.QtCore import QThread, Signal
 
 
 class OpenRouterFetcher(QThread):
     """Thread to fetch models and providers from OpenRouter API."""
 
-    models_fetched = pyqtSignal(list)
-    providers_fetched = pyqtSignal(str, list)
-    provider_details_fetched = pyqtSignal(str, list)
-    error_occurred = pyqtSignal(str)
-    progress_updated = pyqtSignal(str)
+    models_fetched = Signal(list)
+    providers_fetched = Signal(str, list)
+    provider_details_fetched = Signal(str, list)
+    error_occurred = Signal(str)
+    progress_updated = Signal(str)
 
     def __init__(self, fetch_type="models", model_id=None):
         super().__init__()

@@ -3,7 +3,7 @@
 import sys
 import logging
 from pathlib import Path
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 from src.translator.ui import EpubTranslatorApp
 from src.translator.utils.logging_config import setup_logging
@@ -12,7 +12,7 @@ from src.translator.utils.logging_config import setup_logging
 def main():
     """Run the EPUB Translator application.
 
-    Initializes logging and launches the PyQt5 GUI.
+    Initializes logging and launches the PySide6 GUI.
     """
     # Setup logging
     log_dir = Path.home() / ".epub-translator" / "logs"
@@ -40,7 +40,7 @@ def main():
 
         logger.info("Application window displayed successfully")
 
-        exit_code = app.exec_()
+        exit_code = app.exec()
 
         logger.info(f"Application exiting with code: {exit_code}")
         sys.exit(exit_code)

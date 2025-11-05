@@ -2,7 +2,7 @@
 
 import json
 import re
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 from openai import OpenAI
 from ebooklib import epub
 from bs4 import BeautifulSoup
@@ -13,10 +13,10 @@ from .context_manager import ContextManager
 class TocTranslationWorker(QObject):
     """Worker for translating TOC entries with context awareness."""
 
-    update_progress = pyqtSignal(str, str)  # message, color
-    raw_json_updated = pyqtSignal(str)  # raw JSON response
-    finished = pyqtSignal(bool, str)  # success, message
-    toc_item_translated = pyqtSignal(int, int, str, str)  # current, total, original, translated
+    update_progress = Signal(str, str)
+    raw_json_updated = Signal(str)
+    finished = Signal(bool, str)
+    toc_item_translated = Signal(int, int, str, str)
 
     def __init__(self, original_book, translated_xhtml_map, context_manager, endpoint_config,
                  batch_size=30, providers_list=None, temperature=0.3, max_tokens=2000,

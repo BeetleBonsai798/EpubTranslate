@@ -5,13 +5,13 @@ import sys
 import queue
 import threading
 import time
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
                              QFileDialog, QCheckBox, QSpinBox, QVBoxLayout, QHBoxLayout,
                              QRadioButton, QTabWidget, QTextEdit, QScrollArea, QGroupBox,
                              QDoubleSpinBox, QComboBox, QListWidget, QListWidgetItem,
-                             QAbstractItemView, QMessageBox, QMenuBar, QAction, QSplitter)
-from PyQt5.QtGui import QFont
+                             QAbstractItemView, QMessageBox, QMenuBar, QSplitter)
+from PySide6.QtGui import QFont, QAction, QTextCursor
 from ebooklib import epub
 
 from ..config import ConfigManager
@@ -166,7 +166,7 @@ class EpubTranslatorApp(QMainWindow):
 
         # Total chapters label
         self.total_chapters_label = QLabel("No EPUB loaded")
-        self.total_chapters_label.setFont(QFont("Arial", 9, QFont.Bold))
+        self.total_chapters_label.setFont(QFont("Arial", 9, QFont.Weight.Bold))
         self.total_chapters_label.setWordWrap(True)
         file_layout.addWidget(self.total_chapters_label)
 
@@ -1302,14 +1302,14 @@ class EpubTranslatorApp(QMainWindow):
     def update_progress(self, text, worker_id, color, log_widget):
         """Update progress text in worker tab."""
         cursor = log_widget.textCursor()
-        cursor.movePosition(cursor.End)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
 
         format_table = {
-            "red": Qt.red,
-            "green": Qt.darkGreen,
-            "blue": Qt.blue,
-            "black": Qt.black,
-            "orange": Qt.darkYellow
+            "red": Qt.GlobalColor.red,
+            "green": Qt.GlobalColor.darkGreen,
+            "blue": Qt.GlobalColor.blue,
+            "black": Qt.GlobalColor.black,
+            "orange": Qt.GlobalColor.darkYellow
         }
 
         log_widget.setTextColor(format_table[color])
@@ -1445,7 +1445,7 @@ class EpubTranslatorApp(QMainWindow):
             import traceback
             traceback.print_exc()
 
-            from PyQt5.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(
                 self,
                 "EPUB Rebuild Error",
@@ -1473,20 +1473,20 @@ class EpubTranslatorApp(QMainWindow):
     def update_toc_progress(self, text, color, log_widget):
         """Update TOC progress text in tab."""
         cursor = log_widget.textCursor()
-        cursor.movePosition(cursor.End)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
 
         format_table = {
-            "red": Qt.red,
-            "green": Qt.darkGreen,
-            "blue": Qt.blue,
-            "black": Qt.black,
-            "orange": Qt.darkYellow,
-            "yellow": Qt.darkYellow,
-            "cyan": Qt.cyan,
-            "white": Qt.black
+            "red": Qt.GlobalColor.red,
+            "green": Qt.GlobalColor.darkGreen,
+            "blue": Qt.GlobalColor.blue,
+            "black": Qt.GlobalColor.black,
+            "orange": Qt.GlobalColor.darkYellow,
+            "yellow": Qt.GlobalColor.darkYellow,
+            "cyan": Qt.GlobalColor.cyan,
+            "white": Qt.GlobalColor.black
         }
 
-        log_widget.setTextColor(format_table.get(color, Qt.black))
+        log_widget.setTextColor(format_table.get(color, Qt.GlobalColor.black))
         cursor.insertText(text)
         log_widget.ensureCursorVisible()
 
@@ -1501,7 +1501,7 @@ class EpubTranslatorApp(QMainWindow):
 
     def on_toc_translation_finished(self, success, message, rebuilder, output_folder, epub_name):
         """Handle TOC translation completion."""
-        from PyQt5.QtWidgets import QMessageBox
+        from PySide6.QtWidgets import QMessageBox
 
         # Update tab title
         for i in range(self.tabs.count()):
@@ -1638,5 +1638,5 @@ class EpubTranslatorApp(QMainWindow):
 
         # Scroll to bottom
         cursor = self.raw_json_tab.textCursor()
-        cursor.movePosition(cursor.End)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
         self.raw_json_tab.setTextCursor(cursor)

@@ -2,10 +2,10 @@
 
 import os
 from typing import Dict
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                              QTableWidget, QTableWidgetItem, QMessageBox, QFileDialog,
                              QProgressBar, QApplication)
-from PyQt5.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor
 
 from ..core.chapter_status import ChapterStatus
 
@@ -26,12 +26,12 @@ class ChapterOverviewWidget(QWidget):
         # Header
         header_layout = QHBoxLayout()
         self.status_label = QLabel("No EPUB loaded")
-        self.status_label.setFont(QFont("Arial", 10, QFont.Bold))
+        self.status_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         header_layout.addWidget(self.status_label)
 
         # Chapter count label (separate from book title)
         self.chapter_count_label = QLabel("")
-        self.chapter_count_label.setFont(QFont("Arial", 10, QFont.Bold))
+        self.chapter_count_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         header_layout.addWidget(self.chapter_count_label)
 
         # Refresh button
@@ -128,15 +128,19 @@ class ChapterOverviewWidget(QWidget):
 
             # Status
             status_item = QTableWidgetItem(status.status)
-            # Color code the status
+            # Color code the status with darker colors
             if status.status.startswith("Completed"):
-                status_item.setBackground(QColor(144, 238, 144))
+                status_item.setBackground(QColor(34, 139, 34))
+                status_item.setForeground(QColor(255, 255, 255))
             elif status.status == "In Progress":
-                status_item.setBackground(QColor(255, 255, 0))
+                status_item.setBackground(QColor(184, 134, 11))
+                status_item.setForeground(QColor(255, 255, 255))
             elif status.status == "Error":
-                status_item.setBackground(QColor(255, 182, 193))
+                status_item.setBackground(QColor(178, 34, 34))
+                status_item.setForeground(QColor(255, 255, 255))
             else:
-                status_item.setBackground(QColor(220, 220, 220))
+                status_item.setBackground(QColor(70, 70, 70))
+                status_item.setForeground(QColor(200, 200, 200))
 
             self.chapter_table.setItem(row, 2, status_item)
 
