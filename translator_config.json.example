@@ -1,0 +1,38 @@
+{
+  "use_custom_endpoint": false,
+  "custom_endpoint_model": "deepseek-ai/DeepSeek-V3.2-Exp",
+  "model": "deepseek/deepseek-v3.2-exp",
+  "chunk_tokens": 7000,
+  "temperature": 0.9,
+  "max_tokens": 12000,
+  "frequency_penalty": 0.0,
+  "top_p": 0.95,
+  "top_k": 0,
+  "timeout": 10.0,
+  "retries_per_provider": 2,
+  "selected_providers": [
+    "novita/fp8",
+    "siliconflow/fp8",
+    "deepinfra/fp4",
+    "gmicloud/fp8"
+  ],
+  "context_mode": true,
+  "notes_mode": false,
+  "power_steering": false,
+  "send_previous": false,
+  "previous_chapters": 1,
+  "send_previous_chunks": false,
+  "compress_paragraphs": false,
+  "concurrent_workers": 1,
+  "chapter_selection_mode": "range",
+  "start_chapter": "1",
+  "end_chapter": "1",
+  "csv_chapters": "",
+  "last_epub_path": "",
+  "window_geometry": {
+    "x": 100,
+    "y": 100,
+    "width": 1200,
+    "height": 800
+  }
+}
