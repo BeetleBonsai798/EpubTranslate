@@ -107,9 +107,29 @@ class TranslationWorker(QObject):
 
     def _setup_context_filter(self):
         self._context_filter = ContextFilter()
-        self.context_manager.set_context_filter(self._context_filter, enabled=True)
+        filter_chars = self.embedding_config.get('filter_characters', False)
+        filter_places = self.embedding_config.get('filter_places', True)
+        filter_terms = self.embedding_config.get('filter_terms', True)
+
+        self.context_manager.set_context_filter(
+            self._context_filter,
+            enabled=True,
+            filter_characters=filter_chars,
+            filter_places=filter_places,
+            filter_terms=filter_terms
+        )
+
+        filter_types = []
+        if filter_chars:
+            filter_types.append("chars")
+        if filter_places:
+            filter_types.append("places")
+        if filter_terms:
+            filter_types.append("terms")
+
+        types_str = ", ".join(filter_types) if filter_types else "none"
         self.update_progress.emit(
-            "✅ Context filtering enabled (fuzzy text matching)\n",
+            f"✅ Context filtering enabled for: {types_str}\n",
             self.worker_id, "green"
         )
 
@@ -459,14 +479,16 @@ class TranslationWorker(QObject):
                 total_places_db = len(self.context_manager.places)
                 total_terms_db = len(self.context_manager.terms)
 
-                found_chars = len(match_details['characters'])
-                found_places = len(match_details['places'])
-                found_terms = len(match_details['terms'])
+                filter_chars = self.embedding_config.get('filter_characters', False)
+                filter_places = self.embedding_config.get('filter_places', True)
+                filter_terms = self.embedding_config.get('filter_terms', True)
+
+                char_str = f"{len(match_details['characters'])}/{total_chars_db}" if filter_chars else f"all {total_chars_db}"
+                place_str = f"{len(match_details['places'])}/{total_places_db}" if filter_places else f"all {total_places_db}"
+                term_str = f"{len(match_details['terms'])}/{total_terms_db}" if filter_terms else f"all {total_terms_db}"
 
                 self.update_progress.emit(
-                    f"🔍 Context Filter: {found_chars}/{total_chars_db} chars, "
-                    f"{found_places}/{total_places_db} places, "
-                    f"{found_terms}/{total_terms_db} terms\n",
+                    f"🔍 Context Filter: {char_str} chars, {place_str} places, {term_str} terms\n",
                     self.worker_id, "blue"
                 )
 

@@ -500,19 +500,45 @@ class EpubTranslatorApp(QMainWindow):
 
     def _add_embedding_settings(self, layout):
         """Add context filtering settings section."""
-        embedding_group = QGroupBox("Context Filtering")
-        embedding_layout = QVBoxLayout()
+        filter_group = QGroupBox("Context Filtering")
+        filter_layout = QVBoxLayout()
 
-        self.embedding_enabled_check = QCheckBox("Enable Context Filtering")
-        self.embedding_enabled_check.setToolTip(
-            "Only send context (characters, places, terms) that actually appear in the chunk.\n"
+        self.context_filter_enabled_check = QCheckBox("Enable Context Filtering")
+        self.context_filter_enabled_check.setToolTip(
+            "Only send context that actually appears in the chunk.\n"
             "Reduces token usage for books with large context lists.\n"
             "Uses fuzzy matching to handle Japanese variations (hiragana/katakana)."
         )
-        embedding_layout.addWidget(self.embedding_enabled_check)
+        filter_layout.addWidget(self.context_filter_enabled_check)
 
-        embedding_group.setLayout(embedding_layout)
-        layout.addWidget(embedding_group)
+        filter_types_layout = QHBoxLayout()
+        filter_types_layout.addSpacing(20)
+
+        self.filter_characters_check = QCheckBox("Characters")
+        self.filter_characters_check.setToolTip("Filter character names (off = always send all)")
+        filter_types_layout.addWidget(self.filter_characters_check)
+
+        self.filter_places_check = QCheckBox("Places")
+        self.filter_places_check.setToolTip("Filter place names")
+        filter_types_layout.addWidget(self.filter_places_check)
+
+        self.filter_terms_check = QCheckBox("Terms")
+        self.filter_terms_check.setToolTip("Filter terminology")
+        filter_types_layout.addWidget(self.filter_terms_check)
+
+        filter_types_layout.addStretch()
+        filter_layout.addLayout(filter_types_layout)
+
+        self.context_filter_enabled_check.toggled.connect(self._update_filter_checkboxes)
+
+        filter_group.setLayout(filter_layout)
+        layout.addWidget(filter_group)
+
+    def _update_filter_checkboxes(self, enabled):
+        """Enable/disable filter type checkboxes based on main toggle."""
+        self.filter_characters_check.setEnabled(enabled)
+        self.filter_places_check.setEnabled(enabled)
+        self.filter_terms_check.setEnabled(enabled)
 
     def _add_control_buttons(self, layout):
         """Add control buttons."""
@@ -630,7 +656,11 @@ class EpubTranslatorApp(QMainWindow):
             self.load_epub_file(self.epub_path_entry.text())
 
         # Context filtering settings
-        self.embedding_enabled_check.setChecked(self.config.get('embedding_enabled', False))
+        self.context_filter_enabled_check.setChecked(self.config.get('context_filter_enabled', False))
+        self.filter_characters_check.setChecked(self.config.get('context_filter_characters', False))
+        self.filter_places_check.setChecked(self.config.get('context_filter_places', True))
+        self.filter_terms_check.setChecked(self.config.get('context_filter_terms', True))
+        self._update_filter_checkboxes(self.context_filter_enabled_check.isChecked())
 
         self.update_controls()
 
@@ -695,7 +725,10 @@ class EpubTranslatorApp(QMainWindow):
         }
 
         # Context filtering settings
-        config['embedding_enabled'] = self.embedding_enabled_check.isChecked()
+        config['context_filter_enabled'] = self.context_filter_enabled_check.isChecked()
+        config['context_filter_characters'] = self.filter_characters_check.isChecked()
+        config['context_filter_places'] = self.filter_places_check.isChecked()
+        config['context_filter_terms'] = self.filter_terms_check.isChecked()
 
         return config
 
@@ -1248,7 +1281,10 @@ class EpubTranslatorApp(QMainWindow):
             log_widget = self.create_tab(worker_id)
 
             embedding_config = {
-                'enabled': self.embedding_enabled_check.isChecked()
+                'enabled': self.context_filter_enabled_check.isChecked(),
+                'filter_characters': self.filter_characters_check.isChecked(),
+                'filter_places': self.filter_places_check.isChecked(),
+                'filter_terms': self.filter_terms_check.isChecked()
             }
 
             worker = TranslationWorker(

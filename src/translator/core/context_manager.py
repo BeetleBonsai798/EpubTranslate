@@ -71,6 +71,9 @@ class ContextManager:
 
         self._context_filter: Optional['ContextFilter'] = None
         self._use_context_filter: bool = False
+        self._filter_characters: bool = False
+        self._filter_places: bool = True
+        self._filter_terms: bool = True
 
     def load_characters(self) -> OrderedDict[str, Dict[str, str]]:
         """Load character translations from file.
@@ -592,9 +595,19 @@ class ContextManager:
         terms_string = "\n".join(terms_list)
         return f"Existing Specialized Term Translations:\n{terms_string}\n\n"
 
-    def set_context_filter(self, context_filter: 'ContextFilter', enabled: bool = True) -> None:
+    def set_context_filter(
+        self,
+        context_filter: 'ContextFilter',
+        enabled: bool = True,
+        filter_characters: bool = False,
+        filter_places: bool = True,
+        filter_terms: bool = True
+    ) -> None:
         self._context_filter = context_filter
         self._use_context_filter = enabled
+        self._filter_characters = filter_characters
+        self._filter_places = filter_places
+        self._filter_terms = filter_terms
 
     def enable_context_filter(self, enabled: bool = True) -> None:
         self._use_context_filter = enabled and self._context_filter is not None
@@ -617,12 +630,28 @@ class ContextManager:
                 empty_details
             )
 
-        relevant_chars, relevant_places, relevant_terms, match_details = self._context_filter.filter_all(
-            chunk_text,
-            self.characters,
-            self.places,
-            self.terms
-        )
+        match_details = {'characters': [], 'places': [], 'terms': []}
+
+        if self._filter_characters:
+            relevant_chars, match_details['characters'] = self._context_filter.filter_characters(
+                chunk_text, self.characters
+            )
+        else:
+            relevant_chars = self.characters
+
+        if self._filter_places:
+            relevant_places, match_details['places'] = self._context_filter.filter_places(
+                chunk_text, self.places
+            )
+        else:
+            relevant_places = self.places
+
+        if self._filter_terms:
+            relevant_terms, match_details['terms'] = self._context_filter.filter_terms(
+                chunk_text, self.terms
+            )
+        else:
+            relevant_terms = self.terms
 
         char_prompt = ""
         if relevant_chars:

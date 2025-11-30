@@ -60,11 +60,10 @@ class ConfigManager:
                 "height": 800
             },
             "compress_paragraphs": False,
-            "embedding_enabled": False,
-            "embedding_use_ollama": True,
-            "embedding_ollama_model": "nomic-embed-text",
-            "embedding_openrouter_model": "openai/text-embedding-3-small",
-            "embedding_similarity_threshold": 0.3
+            "context_filter_enabled": False,
+            "context_filter_characters": False,
+            "context_filter_places": True,
+            "context_filter_terms": True
         }
 
         self._env_vars: Dict[str, str] = {}
