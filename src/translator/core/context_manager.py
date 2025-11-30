@@ -4,7 +4,11 @@ import json
 import logging
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, List, Optional, Callable, Any
+from typing import Dict, List, Optional, Callable, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .context_embedding_manager import ContextEmbeddingManager
+    from .context_filter import ContextFilter
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +65,12 @@ class ContextManager:
         self.places: OrderedDict[str, str] = self.load_places()
         self.terms: OrderedDict[str, Dict[str, str]] = self.load_terms()
         self.notes: OrderedDict[str, str] = self.load_notes()
+
+        self._embedding_manager: Optional['ContextEmbeddingManager'] = None
+        self._use_rag: bool = False
+
+        self._context_filter: Optional['ContextFilter'] = None
+        self._use_context_filter: bool = False
 
     def load_characters(self) -> OrderedDict[str, Dict[str, str]]:
         """Load character translations from file.
@@ -483,3 +493,164 @@ class ContextManager:
 
         notes_list = "\n".join([f"{key} = {note}" for key, note in self.notes.items()])
         return f"Important Translation Notes:\n{notes_list}\n\n"
+
+    def set_embedding_manager(
+        self,
+        embedding_manager: 'ContextEmbeddingManager',
+        use_rag: bool = True
+    ) -> None:
+        self._embedding_manager = embedding_manager
+        self._use_rag = use_rag
+
+    def enable_rag(self, enabled: bool = True) -> None:
+        self._use_rag = enabled and self._embedding_manager is not None
+
+    @property
+    def rag_enabled(self) -> bool:
+        return self._use_rag and self._embedding_manager is not None
+
+    def update_embeddings(self, force_rebuild: bool = False) -> tuple:
+        if not self._embedding_manager:
+            return (0, 0, 0)
+
+        return self._embedding_manager.update_all_embeddings(
+            self.characters,
+            self.places,
+            self.terms,
+            force_rebuild=force_rebuild
+        )
+
+    def get_relevant_character_prompt(self, chunk_text: str) -> str:
+        if not self.context_mode:
+            return ""
+
+        if not self._use_rag or not self._embedding_manager:
+            return self.get_character_prompt()
+
+        relevant_chars = self._embedding_manager.find_relevant_characters(
+            chunk_text,
+            self.characters
+        )
+
+        if not relevant_chars:
+            return ""
+
+        char_list = []
+        for orig, char_data in relevant_chars.items():
+            if isinstance(char_data, dict):
+                trans = char_data['translated']
+                gender = char_data['gender']
+                char_list.append(f"{orig} : {trans} : {gender}")
+            else:
+                char_list.append(f"{orig} : {char_data} : not_clear")
+
+        char_string = "\n".join(char_list)
+        return f"Existing Character Translations:\n{char_string}\n\n"
+
+    def get_relevant_place_prompt(self, chunk_text: str) -> str:
+        if not self.context_mode:
+            return ""
+
+        if not self._use_rag or not self._embedding_manager:
+            return self.get_place_prompt()
+
+        relevant_places = self._embedding_manager.find_relevant_places(
+            chunk_text,
+            self.places
+        )
+
+        if not relevant_places:
+            return ""
+
+        place_list = "\n".join([f"{orig} : {trans}" for orig, trans in relevant_places.items()])
+        return f"Existing Place Translations:\n{place_list}\n\n"
+
+    def get_relevant_terms_prompt(self, chunk_text: str) -> str:
+        if not self.context_mode:
+            return ""
+
+        if not self._use_rag or not self._embedding_manager:
+            return self.get_terms_prompt()
+
+        relevant_terms = self._embedding_manager.find_relevant_terms(
+            chunk_text,
+            self.terms
+        )
+
+        if not relevant_terms:
+            return ""
+
+        terms_list = []
+        for orig, term_data in relevant_terms.items():
+            if isinstance(term_data, dict):
+                trans = term_data['translated']
+                category = term_data['category']
+                terms_list.append(f"{orig} : {trans} : {category}")
+            else:
+                terms_list.append(f"{orig} : {term_data} : other")
+
+        terms_string = "\n".join(terms_list)
+        return f"Existing Specialized Term Translations:\n{terms_string}\n\n"
+
+    def set_context_filter(self, context_filter: 'ContextFilter', enabled: bool = True) -> None:
+        self._context_filter = context_filter
+        self._use_context_filter = enabled
+
+    def enable_context_filter(self, enabled: bool = True) -> None:
+        self._use_context_filter = enabled and self._context_filter is not None
+
+    @property
+    def context_filter_enabled(self) -> bool:
+        return self._use_context_filter and self._context_filter is not None
+
+    def get_all_relevant_prompts(self, chunk_text: str) -> tuple:
+        empty_details = {'characters': [], 'places': [], 'terms': []}
+
+        if not self.context_mode:
+            return ("", "", "", empty_details)
+
+        if not self._use_context_filter or not self._context_filter:
+            return (
+                self.get_character_prompt(),
+                self.get_place_prompt(),
+                self.get_terms_prompt(),
+                empty_details
+            )
+
+        relevant_chars, relevant_places, relevant_terms, match_details = self._context_filter.filter_all(
+            chunk_text,
+            self.characters,
+            self.places,
+            self.terms
+        )
+
+        char_prompt = ""
+        if relevant_chars:
+            char_list = []
+            for orig, char_data in relevant_chars.items():
+                if isinstance(char_data, dict):
+                    trans = char_data['translated']
+                    gender = char_data['gender']
+                    char_list.append(f"{orig} : {trans} : {gender}")
+                else:
+                    char_list.append(f"{orig} : {char_data} : not_clear")
+            char_prompt = f"Existing Character Translations:\n" + "\n".join(char_list) + "\n\n"
+
+        place_prompt = ""
+        if relevant_places:
+            place_list = "\n".join([f"{orig} : {trans}" for orig, trans in relevant_places.items()])
+            place_prompt = f"Existing Place Translations:\n{place_list}\n\n"
+
+        terms_prompt = ""
+        if relevant_terms:
+            terms_list = []
+            for orig, term_data in relevant_terms.items():
+                if isinstance(term_data, dict):
+                    trans = term_data['translated']
+                    category = term_data['category']
+                    terms_list.append(f"{orig} : {trans} : {category}")
+                else:
+                    terms_list.append(f"{orig} : {term_data} : other")
+            terms_prompt = f"Existing Specialized Term Translations:\n" + "\n".join(terms_list) + "\n\n"
+
+        return (char_prompt, place_prompt, terms_prompt, match_details)

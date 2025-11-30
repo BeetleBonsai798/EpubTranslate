@@ -10,6 +10,7 @@ from openai import OpenAI
 from bs4 import BeautifulSoup
 
 from .context_manager import ContextManager
+from .context_filter import ContextFilter
 from .prompts import (
     SYSTEM_PROMPT,
     CHARACTER_INSTRUCTION,
@@ -43,7 +44,7 @@ class TranslationWorker(QObject):
                  context_mode, notes_mode, power_steering, epub_name, chapter_queue, all_chapters,
                  temperature, max_tokens, frequency_penalty, top_p=1.0, top_k=0, timeout=60.0,
                  providers_list=None, api_key="", epub_book=None, endpoint_config=None,
-                 retries_per_provider=1):
+                 retries_per_provider=1, embedding_config=None):
         super().__init__()
         self.output_folder = output_folder
 
@@ -91,11 +92,26 @@ class TranslationWorker(QObject):
             output_folder, epub_name, context_mode, notes_mode
         )
 
+        # Initialize context filtering support
+        self.embedding_config = embedding_config or {'enabled': False}
+        self._context_filter = None
+
+        if self.embedding_config.get('enabled', False) and context_mode:
+            self._setup_context_filter()
+
         self.previous_chapter_pairs = []
 
     def stop(self):
         """Stop the worker."""
         self._is_running = False
+
+    def _setup_context_filter(self):
+        self._context_filter = ContextFilter()
+        self.context_manager.set_context_filter(self._context_filter, enabled=True)
+        self.update_progress.emit(
+            "✅ Context filtering enabled (fuzzy text matching)\n",
+            self.worker_id, "green"
+        )
 
     def run(self):
         """Main worker loop."""
@@ -434,17 +450,50 @@ class TranslationWorker(QObject):
             {"role": "system", "content": SYSTEM_PROMPT},
         ]
 
-        # Add context prompts based on enabled modes
+        # Add context prompts based on enabled modes (with filtering if available)
         if self.context_mode:
-            char_prompt = self.context_manager.get_character_prompt()
+            if self.context_manager.context_filter_enabled:
+                char_prompt, place_prompt, terms_prompt, match_details = self.context_manager.get_all_relevant_prompts(chunk)
+
+                total_chars_db = len(self.context_manager.characters)
+                total_places_db = len(self.context_manager.places)
+                total_terms_db = len(self.context_manager.terms)
+
+                found_chars = len(match_details['characters'])
+                found_places = len(match_details['places'])
+                found_terms = len(match_details['terms'])
+
+                self.update_progress.emit(
+                    f"🔍 Context Filter: {found_chars}/{total_chars_db} chars, "
+                    f"{found_places}/{total_places_db} places, "
+                    f"{found_terms}/{total_terms_db} terms\n",
+                    self.worker_id, "blue"
+                )
+
+                if match_details['characters']:
+                    char_info = ", ".join([f"{orig}→{trans} ['{matched}' {mtype}]"
+                                          for orig, trans, matched, mtype in match_details['characters'][:5]])
+                    self.update_progress.emit(f"  📌 Chars: {char_info}\n", self.worker_id, "blue")
+
+                if match_details['places']:
+                    place_info = ", ".join([f"{orig}→{trans} ['{matched}' {mtype}]"
+                                           for orig, trans, matched, mtype in match_details['places'][:5]])
+                    self.update_progress.emit(f"  📍 Places: {place_info}\n", self.worker_id, "blue")
+
+                if match_details['terms']:
+                    term_info = ", ".join([f"{orig}→{trans} ['{matched}' {mtype}]"
+                                          for orig, trans, matched, mtype in match_details['terms'][:5]])
+                    self.update_progress.emit(f"  ⚔️ Terms: {term_info}\n", self.worker_id, "blue")
+
+            else:
+                char_prompt = self.context_manager.get_character_prompt()
+                place_prompt = self.context_manager.get_place_prompt()
+                terms_prompt = self.context_manager.get_terms_prompt()
+
             if char_prompt:
                 base_messages.append({"role": "user", "content": char_prompt})
-
-            place_prompt = self.context_manager.get_place_prompt()
             if place_prompt:
                 base_messages.append({"role": "user", "content": place_prompt})
-
-            terms_prompt = self.context_manager.get_terms_prompt()
             if terms_prompt:
                 base_messages.append({"role": "user", "content": terms_prompt})
 
@@ -776,12 +825,15 @@ class TranslationWorker(QObject):
 
                         # Update all lists based on enabled modes
                         if self.context_mode:
+                            context_updated = False
                             if 'characters' in json_data:
                                 self.context_manager.update_characters(json_data['characters'])
                                 self.characters_updated.emit()
+                                context_updated = True
                             if 'places' in json_data:
                                 self.context_manager.update_places(json_data['places'])
                                 self.places_updated.emit()
+                                context_updated = True
                             if 'terms' in json_data:
                                 self.context_manager.update_terms(json_data['terms'])
                                 self.terms_updated.emit()

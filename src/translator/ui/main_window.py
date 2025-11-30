@@ -142,6 +142,9 @@ class EpubTranslatorApp(QMainWindow):
         # Translation Settings
         self._add_translation_settings(layout)
 
+        # Embedding/RAG Settings
+        self._add_embedding_settings(layout)
+
         # Control buttons
         self._add_control_buttons(layout)
 
@@ -495,6 +498,22 @@ class EpubTranslatorApp(QMainWindow):
         self.context_mode_check.toggled.connect(self.update_controls)
         self.notes_mode_check.toggled.connect(self.update_controls)
 
+    def _add_embedding_settings(self, layout):
+        """Add context filtering settings section."""
+        embedding_group = QGroupBox("Context Filtering")
+        embedding_layout = QVBoxLayout()
+
+        self.embedding_enabled_check = QCheckBox("Enable Context Filtering")
+        self.embedding_enabled_check.setToolTip(
+            "Only send context (characters, places, terms) that actually appear in the chunk.\n"
+            "Reduces token usage for books with large context lists.\n"
+            "Uses fuzzy matching to handle Japanese variations (hiragana/katakana)."
+        )
+        embedding_layout.addWidget(self.embedding_enabled_check)
+
+        embedding_group.setLayout(embedding_layout)
+        layout.addWidget(embedding_group)
+
     def _add_control_buttons(self, layout):
         """Add control buttons."""
         btn_layout = QVBoxLayout()
@@ -610,6 +629,9 @@ class EpubTranslatorApp(QMainWindow):
         if self.epub_path_entry.text():
             self.load_epub_file(self.epub_path_entry.text())
 
+        # Context filtering settings
+        self.embedding_enabled_check.setChecked(self.config.get('embedding_enabled', False))
+
         self.update_controls()
 
     def get_config_from_ui(self):
@@ -671,6 +693,9 @@ class EpubTranslatorApp(QMainWindow):
             'width': self.width(),
             'height': self.height()
         }
+
+        # Context filtering settings
+        config['embedding_enabled'] = self.embedding_enabled_check.isChecked()
 
         return config
 
@@ -1222,6 +1247,10 @@ class EpubTranslatorApp(QMainWindow):
 
             log_widget = self.create_tab(worker_id)
 
+            embedding_config = {
+                'enabled': self.embedding_enabled_check.isChecked()
+            }
+
             worker = TranslationWorker(
                 output_folder=output_folder,
                 model=model_id,
@@ -1246,7 +1275,8 @@ class EpubTranslatorApp(QMainWindow):
                 api_key=endpoint_config['api_key'],
                 epub_book=self.epub_book,
                 endpoint_config=endpoint_config,
-                retries_per_provider=self.retries_per_provider_spin.value()
+                retries_per_provider=self.retries_per_provider_spin.value(),
+                embedding_config=embedding_config
             )
 
             thread = threading.Thread(target=worker.run)
