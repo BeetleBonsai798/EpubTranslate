@@ -124,8 +124,18 @@ class EpubTranslatorApp(QMainWindow):
 
     def setup_settings_panel(self, panel):
         """Setup the left settings panel."""
+        panel_layout = QVBoxLayout()
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel.setLayout(panel_layout)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+
+        content_widget = QWidget()
         layout = QVBoxLayout()
-        panel.setLayout(layout)
+        content_widget.setLayout(layout)
 
         # File selection
         self._add_file_selection(layout)
@@ -150,6 +160,9 @@ class EpubTranslatorApp(QMainWindow):
 
         # Add stretch to push everything to top
         layout.addStretch()
+
+        scroll_area.setWidget(content_widget)
+        panel_layout.addWidget(scroll_area)
 
     def _add_file_selection(self, layout):
         """Add file selection section."""
