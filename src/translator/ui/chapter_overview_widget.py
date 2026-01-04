@@ -177,20 +177,18 @@ class ChapterOverviewWidget(QWidget):
         """Update summary information."""
         total = len(self.chapter_statuses)
         completed_xhtml = sum(1 for s in self.chapter_statuses.values() if s.xhtml_exists)
-        not_started = total - completed_xhtml
 
-        # Update labels separately
         self.status_label.setText(f"EPUB: {getattr(self, 'epub_name', 'None')}")
         self.chapter_count_label.setText(f"Translated: {completed_xhtml}/{total} chapters")
-        
-        # Enable build EPUB button ONLY if ALL chapters are translated
+
+        has_any_translation = completed_xhtml > 0
         all_chapters_translated = (completed_xhtml == total and total > 0)
-        self.build_epub_btn.setEnabled(all_chapters_translated)
-        
+        self.build_epub_btn.setEnabled(has_any_translation)
+
         if all_chapters_translated:
             self.build_epub_btn.setStyleSheet("QPushButton { background-color: #90EE90; font-weight: bold; }")
-        else:
-            self.build_epub_btn.setStyleSheet("")
+        elif has_any_translation:
+            self.build_epub_btn.setStyleSheet("QPushButton { background-color: #FFD700; font-weight: bold; }")
 
     def open_file(self, file_path: str):
         """Open file with system default application."""
@@ -204,29 +202,31 @@ class ChapterOverviewWidget(QWidget):
             QMessageBox.warning(self, "Error", f"Could not open file: {str(e)}")
 
     def build_epub(self):
-        """Build final EPUB with TOC translation - only when all chapters are translated."""
+        """Build final EPUB with TOC translation - supports partial translations."""
         if not hasattr(self, 'epub_path') or not self.epub_path:
             QMessageBox.warning(self, "Warning", "No EPUB file loaded!")
             return
-            
+
         if not hasattr(self, 'output_folder') or not os.path.exists(self.output_folder):
             QMessageBox.warning(self, "Warning", "No output folder found!")
             return
-        
-        # Verify all chapters are translated
+
         total = len(self.chapter_statuses)
         completed = sum(1 for s in self.chapter_statuses.values() if s.xhtml_exists)
-        
+
         if completed < total:
-            QMessageBox.warning(
+            reply = QMessageBox.question(
                 self,
-                "Incomplete Translation",
+                "Partial Translation",
                 f"Only {completed}/{total} chapters are translated.\n\n"
-                f"Please translate all chapters before building the final EPUB."
+                f"Untranslated chapters will use the original content.\n\n"
+                f"Build EPUB with partial translation?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
             )
-            return
-        
-        # Call the parent's build_final_epub method
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
         if self.parent_app:
             self.parent_app.build_final_epub()
         else:

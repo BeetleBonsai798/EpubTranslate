@@ -1487,7 +1487,7 @@ class EpubTranslatorApp(QMainWindow):
                 translated_xhtml_map=translated_map,
                 context_manager=context_manager,
                 endpoint_config=endpoint_config,
-                batch_size=30,
+                batch_size=60,
                 providers_list=selected_providers,
                 temperature=self.temperature_spin.value(),
                 max_tokens=self.max_tokens_spin.value(),
