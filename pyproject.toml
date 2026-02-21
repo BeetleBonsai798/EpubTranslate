@@ -7,7 +7,7 @@ name = "epub-translate"
 version = "1.0.0"
 description = "AI-powered EPUB ebook translation with advanced context management"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "EpubTranslate Contributors"}
