@@ -485,12 +485,27 @@ class EpubTranslatorApp(QMainWindow):
         self.power_steering_check = QCheckBox("Power Steering (JSON instructions in user prompt)")
         self.send_previous_check = QCheckBox("Send Previous Chapters")
         self.send_previous_chunks_check = QCheckBox("Send Previous Chunks")
-
         settings_layout.addWidget(self.context_mode_check)
         settings_layout.addWidget(self.notes_mode_check)
         settings_layout.addWidget(self.power_steering_check)
         settings_layout.addWidget(self.send_previous_check)
         settings_layout.addWidget(self.send_previous_chunks_check)
+
+        # Base prompt position
+        base_prompt_layout = QHBoxLayout()
+        base_prompt_layout.addWidget(QLabel("Base Prompt:"))
+        self.base_prompt_combo = QComboBox()
+        self.base_prompt_combo.addItem("Off", "off")
+        self.base_prompt_combo.addItem("Before Raw (Top)", "top")
+        self.base_prompt_combo.addItem("After Raw (Bottom)", "bottom")
+        self.base_prompt_combo.setToolTip(
+            "Off: Exclude the base translation instruction\n"
+            "Before Raw: Send base instruction after context, before the raw text\n"
+            "After Raw: Send base instruction after the raw text (default)"
+        )
+        base_prompt_layout.addWidget(self.base_prompt_combo)
+        base_prompt_layout.addStretch()
+        settings_layout.addLayout(base_prompt_layout)
 
         # Previous chapters count
         prev_layout = QHBoxLayout()
@@ -649,6 +664,10 @@ class EpubTranslatorApp(QMainWindow):
         self.send_previous_check.setChecked(self.config.get('send_previous', False))
         self.previous_chapters_spin.setValue(self.config.get('previous_chapters', 1))
         self.send_previous_chunks_check.setChecked(self.config.get('send_previous_chunks', True))
+        base_prompt_pos = self.config.get('base_prompt_position', 'bottom')
+        index = self.base_prompt_combo.findData(base_prompt_pos)
+        if index >= 0:
+            self.base_prompt_combo.setCurrentIndex(index)
 
         # Concurrency
         self.concurrency_spin.setValue(self.config.get('concurrent_workers', 3))
@@ -716,6 +735,7 @@ class EpubTranslatorApp(QMainWindow):
         config['send_previous'] = self.send_previous_check.isChecked()
         config['previous_chapters'] = self.previous_chapters_spin.value()
         config['send_previous_chunks'] = self.send_previous_chunks_check.isChecked()
+        config['base_prompt_position'] = self.base_prompt_combo.currentData()
 
         # Concurrency
         config['concurrent_workers'] = self.concurrency_spin.value()
@@ -1325,7 +1345,8 @@ class EpubTranslatorApp(QMainWindow):
                 epub_book=self.epub_book,
                 endpoint_config=endpoint_config,
                 retries_per_provider=self.retries_per_provider_spin.value(),
-                embedding_config=embedding_config
+                embedding_config=embedding_config,
+                base_prompt_position=self.base_prompt_combo.currentData()
             )
 
             thread = threading.Thread(target=worker.run)

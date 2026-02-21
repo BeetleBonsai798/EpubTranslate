@@ -63,7 +63,8 @@ class ConfigManager:
             "context_filter_enabled": False,
             "context_filter_characters": False,
             "context_filter_places": True,
-            "context_filter_terms": True
+            "context_filter_terms": True,
+            "base_prompt_position": "bottom"
         }
 
         self._env_vars: Dict[str, str] = {}

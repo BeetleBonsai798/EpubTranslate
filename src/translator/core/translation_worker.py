@@ -44,7 +44,7 @@ class TranslationWorker(QObject):
                  context_mode, notes_mode, power_steering, epub_name, chapter_queue, all_chapters,
                  temperature, max_tokens, frequency_penalty, top_p=1.0, top_k=0, timeout=60.0,
                  providers_list=None, api_key="", epub_book=None, endpoint_config=None,
-                 retries_per_provider=1, embedding_config=None):
+                 retries_per_provider=1, embedding_config=None, base_prompt_position='bottom'):
         super().__init__()
         self.output_folder = output_folder
 
@@ -73,6 +73,7 @@ class TranslationWorker(QObject):
         self.top_k = top_k
         self.timeout = timeout
         self.retries_per_provider = retries_per_provider
+        self.base_prompt_position = base_prompt_position
 
         # Endpoint configuration
         self.endpoint_config = endpoint_config or {
@@ -569,9 +570,12 @@ class TranslationWorker(QObject):
             system_additions += "\n\n" + json_format_instruction
             base_messages[0]["content"] = base_messages[0]["content"] + system_additions
 
+        # When base prompt position is 'top', insert it before the raw text
+        if self.base_prompt_position == 'top':
+            base_messages.append({"role": "user", "content": BASE_INSTRUCTION})
+
         # Add current chunk to translate
         base_messages.extend([
-            # {"role": "user", "content": instruction},
             {"role": "user", "content": f"CURRENT CHAPTER - TEXT TO TRANSLATE:\n```[START]\n{chunk}\n```[END]"},
             {"role": "user", "content": instruction},
         ])
@@ -680,9 +684,15 @@ class TranslationWorker(QObject):
         # Build the full instruction
         # If power_steering is enabled, include JSON format and context/notes instructions in user instruction (default behavior)
         # If power_steering is disabled, exclude them from user instruction (they go in system prompt)
+        # Only include BASE_INSTRUCTION in the final instruction when position is 'bottom'
+        # When 'top', it's sent as a separate message before the raw text in translate_chunk()
+        # When 'off', it's excluded entirely
+        include_base_in_instruction = self.base_prompt_position == 'bottom'
+        base_instruction = BASE_INSTRUCTION if include_base_in_instruction else ""
+
         if self.power_steering:
             full_instruction = (
-                BASE_INSTRUCTION +
+                base_instruction +
                 f"ALWAYS list in this EXACT ORDER:\n"
                 f"{''.join(instruction_parts)}\n"
                 f"{notes_instruction}\n"
@@ -690,7 +700,7 @@ class TranslationWorker(QObject):
                 f"{ENDING_INSTRUCTION}"
             )
         else:
-            full_instruction = BASE_INSTRUCTION + ENDING_INSTRUCTION
+            full_instruction = base_instruction + ENDING_INSTRUCTION
 
         return full_instruction, json_format_instruction, context_notes_system_instruction
 
@@ -746,6 +756,8 @@ class TranslationWorker(QObject):
                         'frequency_penalty': self.frequency_penalty,
                         'top_p': self.top_p,
                     }
+
+                    # print(messages_for_provider)
 
                     # Initialize extra_body if needed
                     extra_body = {}
