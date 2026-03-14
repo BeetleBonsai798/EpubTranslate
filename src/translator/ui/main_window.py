@@ -2,6 +2,7 @@
 
 import os
 import sys
+import json
 import queue
 import threading
 import time
@@ -46,6 +47,7 @@ class EpubTranslatorApp(QMainWindow):
         self.chapters = []
         self.epub_book = None
         self.epub_path = None
+        self.toc_translations = {}  # {chapter_number: [{"original": ..., "translated": ...}]}
 
         # OpenRouter data
         self.available_models = []
@@ -58,6 +60,7 @@ class EpubTranslatorApp(QMainWindow):
         self.current_place_file = ""
         self.current_terms_file = ""
         self.current_notes_file = ""
+        self.current_toc_file = ""
 
         self.init_ui()
         self.load_config_to_ui()
@@ -518,6 +521,21 @@ class EpubTranslatorApp(QMainWindow):
         prev_layout.addStretch()
         settings_layout.addLayout(prev_layout)
 
+        # Previous TOC items count
+        prev_toc_layout = QHBoxLayout()
+        prev_toc_layout.addWidget(QLabel("Previous TOC Items:"))
+        self.previous_toc_spin = QSpinBox()
+        self.previous_toc_spin.setRange(0, 50)
+        self.previous_toc_spin.setValue(10)
+        self.previous_toc_spin.setMaximumWidth(60)
+        self.previous_toc_spin.setToolTip(
+            "Number of previously translated TOC entries to send for naming consistency.\n"
+            "Set to 0 to disable. TOC entries are translated inline with chapter translation."
+        )
+        prev_toc_layout.addWidget(self.previous_toc_spin)
+        prev_toc_layout.addStretch()
+        settings_layout.addLayout(prev_toc_layout)
+
         settings_group.setLayout(settings_layout)
         layout.addWidget(settings_group)
 
@@ -614,10 +632,16 @@ class EpubTranslatorApp(QMainWindow):
         self.raw_json_tab.setReadOnly(True)
         self.raw_json_tab.setFont(QFont("Courier New", 9))
 
+        # Add TOC display tab
+        self.toc_tab = QTextEdit()
+        self.toc_tab.setReadOnly(True)
+        self.toc_tab.setFont(QFont("Consolas", 10))
+
         self.tabs.addTab(self.character_tab, "👤 Characters")
         self.tabs.addTab(self.place_tab, "🌍 Places")
         self.tabs.addTab(self.terms_tab, "⚡ Terms")
         self.tabs.addTab(self.notes_tab, "📝 Notes")
+        self.tabs.addTab(self.toc_tab, "📑 TOC")
         self.tabs.addTab(self.raw_json_tab, "🔧 Raw JSON")
 
     # ==================== Configuration Methods ====================
@@ -664,6 +688,7 @@ class EpubTranslatorApp(QMainWindow):
         self.send_previous_check.setChecked(self.config.get('send_previous', False))
         self.previous_chapters_spin.setValue(self.config.get('previous_chapters', 1))
         self.send_previous_chunks_check.setChecked(self.config.get('send_previous_chunks', True))
+        self.previous_toc_spin.setValue(self.config.get('previous_toc_count', 10))
         base_prompt_pos = self.config.get('base_prompt_position', 'bottom')
         index = self.base_prompt_combo.findData(base_prompt_pos)
         if index >= 0:
@@ -735,6 +760,7 @@ class EpubTranslatorApp(QMainWindow):
         config['send_previous'] = self.send_previous_check.isChecked()
         config['previous_chapters'] = self.previous_chapters_spin.value()
         config['send_previous_chunks'] = self.send_previous_chunks_check.isChecked()
+        config['previous_toc_count'] = self.previous_toc_spin.value()
         config['base_prompt_position'] = self.base_prompt_combo.currentData()
 
         # Concurrency
@@ -1187,6 +1213,7 @@ class EpubTranslatorApp(QMainWindow):
             self.current_place_file = os.path.join(context_folder, f"{epub_name}_places.json")
             self.current_terms_file = os.path.join(context_folder, f"{epub_name}_terms.json")
             self.current_notes_file = os.path.join(context_folder, f"{epub_name}_notes.json")
+            self.current_toc_file = os.path.join(context_folder, f"{epub_name}_toc.json")
 
             # Update chapter overview
             self.chapter_overview.update_epub_info(epub_path, self.chapters, epub_name)
@@ -1293,6 +1320,7 @@ class EpubTranslatorApp(QMainWindow):
         self.current_place_file = os.path.join(context_folder, f"{epub_name}_places.json")
         self.current_terms_file = os.path.join(context_folder, f"{epub_name}_terms.json")
         self.current_notes_file = os.path.join(context_folder, f"{epub_name}_notes.json")
+        self.current_toc_file = os.path.join(context_folder, f"{epub_name}_toc.json")
 
         # Load existing files
         self.update_all_displays()
@@ -1305,6 +1333,10 @@ class EpubTranslatorApp(QMainWindow):
 
         # Determine number of workers
         num_workers = self.concurrency_spin.value()
+
+        # Build TOC map: chapter_number -> list of TOC entries
+        toc_map = self._build_toc_map()
+        self.toc_translations = {}  # Accumulated from workers via signals
 
         # Create and start workers
         for _ in range(num_workers):
@@ -1346,7 +1378,9 @@ class EpubTranslatorApp(QMainWindow):
                 endpoint_config=endpoint_config,
                 retries_per_provider=self.retries_per_provider_spin.value(),
                 embedding_config=embedding_config,
-                base_prompt_position=self.base_prompt_combo.currentData()
+                base_prompt_position=self.base_prompt_combo.currentData(),
+                toc_map=toc_map,
+                previous_toc_count=self.previous_toc_spin.value()
             )
 
             thread = threading.Thread(target=worker.run)
@@ -1363,6 +1397,7 @@ class EpubTranslatorApp(QMainWindow):
             worker.notes_updated.connect(self.update_notes_display)
             worker.raw_json_updated.connect(self.update_raw_json_display)
             worker.chapter_completed.connect(self.on_chapter_completed)
+            worker.toc_entry_translated.connect(self.on_toc_entry_translated)
 
             self.workers[worker_id] = {
                 'thread': thread,
@@ -1438,6 +1473,119 @@ class EpubTranslatorApp(QMainWindow):
         """Handle chapter completion."""
         self.chapter_overview.refresh_status()
 
+    def _build_toc_map(self):
+        """Build mapping of chapter numbers to their TOC entries.
+
+        Returns dict: {chapter_number: [{"original": title, "href": href}, ...]}
+        """
+        if not self.epub_book:
+            return {}
+
+        from ebooklib import epub
+
+        # Get ordered list of HTML items (same order as self.chapters)
+        html_items = [
+            item for item in self.epub_book.get_items()
+            if isinstance(item, epub.EpubHtml)
+        ]
+
+        # Build reverse mapping: file_name -> chapter_number
+        file_to_chapter = {}
+        for i, item in enumerate(html_items, start=1):
+            file_to_chapter[item.file_name] = i
+
+        # Recursively collect all TOC entries
+        def collect_toc_links(toc_item, results):
+            if isinstance(toc_item, epub.Link):
+                results.append(toc_item)
+            elif isinstance(toc_item, tuple):
+                section, children = toc_item
+                if isinstance(section, epub.Link):
+                    results.append(section)
+                for child in children:
+                    collect_toc_links(child, results)
+
+        all_links = []
+        for item in self.epub_book.toc:
+            collect_toc_links(item, all_links)
+
+        # Map each link to its chapter number
+        toc_map = {}
+        for link in all_links:
+            href = link.href
+            file_path = href.split('#')[0] if '#' in href else href
+
+            # Try to match file_path to a chapter - handle different path formats
+            matched_chapter = None
+            for fname, ch_num in file_to_chapter.items():
+                if fname == file_path or fname.endswith('/' + file_path) or file_path.endswith('/' + fname):
+                    matched_chapter = ch_num
+                    break
+
+            if matched_chapter:
+                if matched_chapter not in toc_map:
+                    toc_map[matched_chapter] = []
+                toc_map[matched_chapter].append({
+                    "original": link.title,
+                    "href": link.href
+                })
+
+        return toc_map
+
+    def on_toc_entry_translated(self, chapter_number, original, translated):
+        """Handle a TOC entry being translated inline."""
+        # Accumulate in main window
+        if chapter_number not in self.toc_translations:
+            self.toc_translations[chapter_number] = []
+
+        # Check if this entry already exists (avoid duplicates)
+        for entry in self.toc_translations[chapter_number]:
+            if entry.get('original') == original:
+                entry['translated'] = translated
+                break
+        else:
+            self.toc_translations[chapter_number].append({
+                'original': original,
+                'translated': translated
+            })
+
+        # Update TOC tab
+        self.toc_tab.append(f"[Ch.{chapter_number}] {original} → {translated}")
+
+    def _apply_inline_toc_translations(self, book, toc_translations):
+        """Apply inline TOC translations to the book's TOC structure.
+
+        Returns the number of entries translated.
+        """
+        # Build translations_map keyed by href for lookup
+        # We need to match TOC entries by their original title + href
+        translations_by_title = {}
+        for ch_num, entries in toc_translations.items():
+            for entry in entries:
+                translations_by_title[entry.get('original', '')] = entry.get('translated', '')
+
+        count = 0
+
+        def translate_item(item):
+            nonlocal count
+            if isinstance(item, epub.Link):
+                translated = translations_by_title.get(item.title)
+                if translated:
+                    count += 1
+                    return epub.Link(item.href, translated, item.uid)
+                return item
+            elif isinstance(item, tuple):
+                section, children = item
+                return (
+                    translate_item(section),
+                    [translate_item(c) for c in children]
+                )
+            return item
+
+        new_toc = [translate_item(item) for item in book.toc]
+        book.toc = tuple(new_toc)
+        return count
+
     def build_final_epub(self):
         """Build final EPUB with TOC translation - called manually from Build EPUB button."""
         if not self.epub_path:
@@ -1445,8 +1593,6 @@ class EpubTranslatorApp(QMainWindow):
 
         try:
             from ..core.epub_rebuilder import EpubRebuilder
-            from ..core.toc_translation_worker import TocTranslationWorker
-            from ..core.context_manager import ContextManager
 
             epub_name = os.path.splitext(os.path.basename(self.epub_path))[0]
             output_folder = os.path.join(os.path.dirname(__file__), "..", "..", "..", f"{epub_name}_translated")
@@ -1467,90 +1613,133 @@ class EpubTranslatorApp(QMainWindow):
 
             print(f"✓ Updated {len(translated_map)} chapters in EPUB")
 
-            # Create TOC translation tab
-            toc_log_widget = self.create_tab_for_toc()
+            # Load inline TOC translations from disk
+            toc_path = os.path.join(output_folder, "context", f"{epub_name}_toc.json")
+            inline_toc = {}
+            if os.path.exists(toc_path):
+                try:
+                    with open(toc_path, 'r', encoding='utf-8') as f:
+                        inline_toc = json.load(f)
+                        inline_toc = {int(k): v for k, v in inline_toc.items()}
+                except Exception as e:
+                    print(f"⚠️ Could not load inline TOC translations: {e}")
 
-            # Get endpoint config
-            if self.custom_endpoint_radio.isChecked():
-                api_key = self.custom_endpoint_key.text().strip()
-                base_url = self.custom_endpoint_url.text().strip()
-                model = self.custom_endpoint_model.text().strip()
+            if inline_toc:
+                # Use inline TOC translations - no extra API calls needed
+                print(f"📑 Applying {sum(len(v) for v in inline_toc.values())} inline TOC translations...")
+                count = self._apply_inline_toc_translations(rebuilder.original_book, inline_toc)
+                print(f"✓ Applied {count} TOC translations")
+
+                # Write final EPUB directly
+                output_epub = os.path.join(output_folder, f"{epub_name}_translated.epub")
+                rebuilder.write_epub(output_epub)
+                print(f"✅ Translated EPUB created: {output_epub}")
+
+                QMessageBox.information(
+                    self,
+                    "EPUB Build Complete",
+                    f"EPUB built successfully with {count} TOC translations!\n\nSaved to:\n{output_epub}"
+                )
             else:
-                api_key = self.api_key_entry.text().strip()
-                base_url = "https://openrouter.ai/api/v1"
-                model = self.model_combo.currentText().strip()
-
-            endpoint_config = {
-                'api_key': api_key,
-                'base_url': base_url,
-                'model': model
-            }
-
-            # Get selected providers
-            selected_providers = []
-            for i in range(self.selected_providers_list.count()):
-                selected_providers.append(self.selected_providers_list.item(i).text())
-
-            if not selected_providers:
-                selected_providers = ['deepseek/deepseek-v3.2-exp']
-
-            # Create context manager to load existing context
-            context_manager = ContextManager(
-                output_folder,
-                epub_name,
-                context_mode=self.context_mode_check.isChecked(),
-                notes_mode=self.notes_mode_check.isChecked()
-            )
-
-            # Create TOC translation worker with full settings
-            self.toc_worker = TocTranslationWorker(
-                original_book=rebuilder.original_book,
-                translated_xhtml_map=translated_map,
-                context_manager=context_manager,
-                endpoint_config=endpoint_config,
-                batch_size=60,
-                providers_list=selected_providers,
-                temperature=self.temperature_spin.value(),
-                max_tokens=self.max_tokens_spin.value(),
-                frequency_penalty=self.frequency_penalty_spin.value(),
-                top_p=self.top_p_spin.value(),
-                top_k=self.top_k_spin.value(),
-                timeout=self.timeout_spin.value(),
-                retries_per_provider=self.retries_per_provider_spin.value()
-            )
-
-            # Create thread
-            toc_thread = threading.Thread(target=self.toc_worker.run)
-
-            # Connect signals
-            self.toc_worker.update_progress.connect(
-                lambda text, color, log=toc_log_widget: self.update_toc_progress(text, color, log)
-            )
-            self.toc_worker.raw_json_updated.connect(self.update_raw_json_display)
-            self.toc_worker.toc_item_translated.connect(self.update_toc_item_status)
-            self.toc_worker.finished.connect(
-                lambda success, msg: self.on_toc_translation_finished(success, msg, rebuilder, output_folder, epub_name)
-            )
-
-            # Store worker reference
-            self.toc_thread = toc_thread
-            self.toc_log_widget = toc_log_widget
-
-            # Start TOC translation
-            print("🔄 Starting TOC Translation in separate thread...")
-            toc_thread.start()
+                # Fall back to old batch TOC translation
+                print("📑 No inline TOC translations found, falling back to batch TOC translation...")
+                self._build_epub_with_batch_toc(rebuilder, output_folder, epub_name, translated_map)
 
         except Exception as e:
             print(f"❌ Error rebuilding EPUB: {str(e)}")
             import traceback
             traceback.print_exc()
-
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(
                 self,
                 "EPUB Rebuild Error",
-                f"Translation completed but EPUB rebuild failed:\n{str(e)}\n\nTranslated XHTML files are available in the output folder."
+                f"Failed to rebuild EPUB:\n{str(e)}\n\nTranslated XHTML files are available in the output folder."
             )
+
+    def _build_epub_with_batch_toc(self, rebuilder, output_folder, epub_name, translated_map):
+        """Fall back to the old batch TOC translation approach."""
+        from ..core.toc_translation_worker import TocTranslationWorker
+        from ..core.context_manager import ContextManager
+
+        # Create TOC translation tab
+        toc_log_widget = self.create_tab_for_toc()
+
+        # Get endpoint config
+        if self.custom_endpoint_radio.isChecked():
+            api_key = self.custom_endpoint_key.text().strip()
+            base_url = self.custom_endpoint_url.text().strip()
+            model = self.custom_endpoint_model.text().strip()
+        else:
+            api_key = self.api_key_entry.text().strip()
+            base_url = "https://openrouter.ai/api/v1"
+            model = self.model_combo.currentText().strip()
+
+        endpoint_config = {
+            'api_key': api_key,
+            'base_url': base_url,
+            'model': model
+        }
+
+        # Get selected providers
+        selected_providers = []
+        for i in range(self.selected_providers_list.count()):
+            selected_providers.append(self.selected_providers_list.item(i).text())
+
+        if not selected_providers:
+            selected_providers = ['deepseek/deepseek-v3.2-exp']
+
+        # Create context manager to load existing context
+        context_manager = ContextManager(
+            output_folder,
+            epub_name,
+            context_mode=self.context_mode_check.isChecked(),
+            notes_mode=self.notes_mode_check.isChecked()
+        )
+
+        # Create TOC translation worker with full settings
+        embedding_config = {
+            'enabled': self.context_filter_enabled_check.isChecked(),
+            'filter_characters': self.filter_characters_check.isChecked(),
+            'filter_places': self.filter_places_check.isChecked(),
+            'filter_terms': self.filter_terms_check.isChecked(),
+        }
+
+        self.toc_worker = TocTranslationWorker(
+            original_book=rebuilder.original_book,
+            translated_xhtml_map=translated_map,
+            context_manager=context_manager,
+            endpoint_config=endpoint_config,
+            batch_size=60,
+            providers_list=selected_providers,
+            temperature=self.temperature_spin.value(),
+            max_tokens=self.max_tokens_spin.value(),
+            frequency_penalty=self.frequency_penalty_spin.value(),
+            top_p=self.top_p_spin.value(),
+            top_k=self.top_k_spin.value(),
+            timeout=self.timeout_spin.value(),
+            retries_per_provider=self.retries_per_provider_spin.value(),
+            embedding_config=embedding_config
+        )
+
+        # Create thread
+        toc_thread = threading.Thread(target=self.toc_worker.run)
+
+        # Connect signals
+        self.toc_worker.update_progress.connect(
+            lambda text, color, log=toc_log_widget: self.update_toc_progress(text, color, log)
+        )
+        self.toc_worker.raw_json_updated.connect(self.update_raw_json_display)
+        self.toc_worker.toc_item_translated.connect(self.update_toc_item_status)
+        self.toc_worker.finished.connect(
+            lambda success, msg: self.on_toc_translation_finished(success, msg, rebuilder, output_folder, epub_name)
+        )
+
+        # Store worker reference
+        self.toc_thread = toc_thread
+        self.toc_log_widget = toc_log_widget
+
+        # Start TOC translation
+        print("🔄 Starting TOC Translation in separate thread...")
+        toc_thread.start()
 
     def create_tab_for_toc(self):
         """Create a tab for TOC translation."""
@@ -1650,6 +1839,7 @@ class EpubTranslatorApp(QMainWindow):
         self.update_place_display()
         self.update_terms_display()
         self.update_notes_display()
+        self.update_toc_display()
 
     def update_character_display(self):
         """Update character display tab."""
@@ -1724,6 +1914,25 @@ class EpubTranslatorApp(QMainWindow):
                 self.notes_tab.setPlainText(f"Error loading notes file: {str(e)}")
         else:
             self.notes_tab.setPlainText("No notes data available yet.")
+
+    def update_toc_display(self):
+        """Update TOC display tab from saved TOC translations."""
+        if self.current_toc_file and os.path.exists(self.current_toc_file):
+            try:
+                with open(self.current_toc_file, 'r', encoding='utf-8') as f:
+                    toc_data = json.load(f)
+                self.toc_translations = {int(k): v for k, v in toc_data.items()}
+                lines = []
+                for ch_num in sorted(self.toc_translations.keys()):
+                    for entry in self.toc_translations[ch_num]:
+                        original = entry.get('original', '')
+                        translated = entry.get('translated', '')
+                        lines.append(f"[Ch.{ch_num}] {original} → {translated}")
+                self.toc_tab.setPlainText("\n".join(lines))
+            except Exception as e:
+                self.toc_tab.setPlainText(f"Error loading TOC file: {str(e)}")
+        else:
+            self.toc_tab.setPlainText("No TOC translations available yet.")
 
     def update_raw_json_display(self, raw_json):
         """Update the raw JSON display with the latest response."""

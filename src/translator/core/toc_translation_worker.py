@@ -8,6 +8,7 @@ from ebooklib import epub
 from bs4 import BeautifulSoup
 
 from .context_manager import ContextManager
+from .context_filter import ContextFilter
 
 
 class TocTranslationWorker(QObject):
@@ -20,7 +21,8 @@ class TocTranslationWorker(QObject):
 
     def __init__(self, original_book, translated_xhtml_map, context_manager, endpoint_config,
                  batch_size=30, providers_list=None, temperature=0.3, max_tokens=2000,
-                 frequency_penalty=0.0, top_p=1.0, top_k=0, timeout=60.0, retries_per_provider=1):
+                 frequency_penalty=0.0, top_p=1.0, top_k=0, timeout=60.0, retries_per_provider=1,
+                 embedding_config=None):
         super().__init__()
         self.original_book = original_book
         self.translated_xhtml_map = translated_xhtml_map
@@ -38,11 +40,31 @@ class TocTranslationWorker(QObject):
         self.timeout = timeout
         self.retries_per_provider = retries_per_provider
 
+        # Context filtering
+        self.embedding_config = embedding_config or {'enabled': False}
+        self._context_filter = None
+        if self.embedding_config.get('enabled', False):
+            self._setup_context_filter()
+
         # Provider settings
         if providers_list and len(providers_list) > 0:
             self.providers = providers_list
         else:
             self.providers = ['deepseek/deepseek-v3.2-exp']
+
+    def _setup_context_filter(self):
+        self._context_filter = ContextFilter()
+        filter_chars = self.embedding_config.get('filter_characters', False)
+        filter_places = self.embedding_config.get('filter_places', True)
+        filter_terms = self.embedding_config.get('filter_terms', True)
+
+        self.context_manager.set_context_filter(
+            self._context_filter,
+            enabled=True,
+            filter_characters=filter_chars,
+            filter_places=filter_places,
+            filter_terms=filter_terms
+        )
 
     def stop(self):
         """Stop the worker."""
@@ -109,13 +131,7 @@ class TocTranslationWorker(QObject):
 
     def translate_batch(self, toc_items, batch_start, batch_end):
         """Translate a batch of TOC items using the API with provider rotation and retries."""
-        # Build context prompts
-        char_context = self.context_manager.get_character_prompt()
-        place_context = self.context_manager.get_place_prompt()
-        terms_context = self.context_manager.get_terms_prompt()
-        notes_context = self.context_manager.get_notes_prompt()
-
-        # Build batch translation request
+        # Build batch translation request first so we can use the text for filtering
         batch_items = []
         for i in range(batch_start, batch_end):
             item = toc_items[i]
@@ -132,6 +148,40 @@ class TocTranslationWorker(QObject):
                 item_data['context_preview'] = context['context'][:200] if context['context'] else ""
 
             batch_items.append(item_data)
+
+        # Build combined text for context filtering
+        batch_text_parts = []
+        for item_data in batch_items:
+            batch_text_parts.append(item_data.get('original', ''))
+            if 'heading' in item_data and item_data['heading']:
+                batch_text_parts.append(item_data['heading'])
+            if 'context_preview' in item_data and item_data['context_preview']:
+                batch_text_parts.append(item_data['context_preview'])
+        batch_text = '\n'.join(batch_text_parts)
+
+        # Build context prompts (with filtering if enabled)
+        if self.context_manager.context_filter_enabled:
+            char_context, place_context, terms_context, match_details = self.context_manager.get_all_relevant_prompts(batch_text)
+
+            total_chars = len(self.context_manager.characters)
+            total_places = len(self.context_manager.places)
+            total_terms = len(self.context_manager.terms)
+            matched_chars = len(match_details.get('characters', []))
+            matched_places = len(match_details.get('places', []))
+            matched_terms = len(match_details.get('terms', []))
+
+            self.update_progress.emit(
+                f"🔍 Context filter: chars {matched_chars}/{total_chars}, "
+                f"places {matched_places}/{total_places}, "
+                f"terms {matched_terms}/{total_terms}",
+                "cyan"
+            )
+        else:
+            char_context = self.context_manager.get_character_prompt()
+            place_context = self.context_manager.get_place_prompt()
+            terms_context = self.context_manager.get_terms_prompt()
+
+        notes_context = self.context_manager.get_notes_prompt()
 
         # Build prompt
         from .prompts import TOC_SYSTEM_PROMPT

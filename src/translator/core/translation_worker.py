@@ -21,7 +21,8 @@ from .prompts import (
     NOTES_REMINDER,
     BASE_INSTRUCTION,
     ENDING_INSTRUCTION,
-    COMPLETE_TRANSLATION_INSTRUCTION
+    COMPLETE_TRANSLATION_INSTRUCTION,
+    TOC_INSTRUCTION
 )
 from ..utils.token_counter import num_tokens_from_string, split_chapter
 
@@ -38,13 +39,15 @@ class TranslationWorker(QObject):
     raw_json_updated = Signal(str)
     status_updated = Signal(int, int, int, int)
     chapter_completed = Signal(int)
+    toc_entry_translated = Signal(int, str, str)  # chapter_number, original, translated
 
     def __init__(self, output_folder, model, max_tokens_per_chunk,
                  send_previous, previous_chapters, send_previous_chunks, worker_id,
                  context_mode, notes_mode, power_steering, epub_name, chapter_queue, all_chapters,
                  temperature, max_tokens, frequency_penalty, top_p=1.0, top_k=0, timeout=60.0,
                  providers_list=None, api_key="", epub_book=None, endpoint_config=None,
-                 retries_per_provider=1, embedding_config=None, base_prompt_position='bottom'):
+                 retries_per_provider=1, embedding_config=None, base_prompt_position='bottom',
+                 toc_map=None, previous_toc_count=10):
         super().__init__()
         self.output_folder = output_folder
 
@@ -101,6 +104,59 @@ class TranslationWorker(QObject):
             self._setup_context_filter()
 
         self.previous_chapter_pairs = []
+
+        # Inline TOC translation
+        self.toc_map = toc_map or {}  # {chapter_number: [{"original": title, "href": href}, ...]}
+        self.previous_toc_count = previous_toc_count
+        self.toc_translations = {}  # {chapter_number: [{"original": ..., "translated": ...}, ...]}
+        self._load_existing_toc_translations()
+
+    def _load_existing_toc_translations(self):
+        """Load existing TOC translations from disk for previous TOC context."""
+        toc_path = os.path.join(self.output_folder, "context", f"{self.epub_name}_toc.json")
+        if os.path.exists(toc_path):
+            try:
+                with open(toc_path, 'r', encoding='utf-8') as f:
+                    self.toc_translations = json.load(f)
+                    # Keys are strings from JSON, convert to int
+                    self.toc_translations = {int(k): v for k, v in self.toc_translations.items()}
+            except Exception:
+                self.toc_translations = {}
+
+    def _save_toc_translations(self):
+        """Save TOC translations to disk (read-merge-write for multi-worker safety)."""
+        context_folder = os.path.join(self.output_folder, "context")
+        os.makedirs(context_folder, exist_ok=True)
+        toc_path = os.path.join(context_folder, f"{self.epub_name}_toc.json")
+
+        # Read existing file to merge (another worker may have written)
+        existing = {}
+        if os.path.exists(toc_path):
+            try:
+                with open(toc_path, 'r', encoding='utf-8') as f:
+                    existing = {int(k): v for k, v in json.load(f).items()}
+            except Exception:
+                pass
+
+        # Merge: this worker's translations take priority for its chapters
+        existing.update(self.toc_translations)
+
+        with open(toc_path, 'w', encoding='utf-8') as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+
+    def _get_previous_toc_entries(self, current_chapter_number):
+        """Get the last N translated TOC entries before the current chapter for consistency."""
+        if self.previous_toc_count <= 0:
+            return []
+        previous_entries = []
+        # Collect from all chapters before current, sorted by chapter number
+        for ch_num in sorted(self.toc_translations.keys()):
+            if ch_num >= current_chapter_number:
+                break
+            for entry in self.toc_translations[ch_num]:
+                previous_entries.append(entry)
+        # Return only the last N
+        return previous_entries[-self.previous_toc_count:]
 
     def stop(self):
         """Stop the worker."""
@@ -315,7 +371,8 @@ class TranslationWorker(QObject):
                 "black"
             )
 
-            translated_chunk = self.translate_chunk(chunk, current_chapter_chunks, current_chapter_translations)
+            translated_chunk = self.translate_chunk(chunk, current_chapter_chunks, current_chapter_translations,
+                                                    chapter_number=chapter_number, chunk_index=i)
 
             if translated_chunk is None:
                 all_chunks_successful = False
@@ -331,6 +388,10 @@ class TranslationWorker(QObject):
             self.status_updated.emit(self.worker_id, chapter_number, total_chunks, total_chunks)
 
             self.create_xhtml_chapter(chapter_number, translated_chunks, chapter)
+
+            # Save TOC translations to disk if any were collected
+            if chapter_number in self.toc_translations:
+                self._save_toc_translations()
 
             self.update_progress.emit(
                 f"\n\n✅ Chapter {chapter_number} completed successfully!\n",
@@ -373,6 +434,39 @@ class TranslationWorker(QObject):
         text = re.sub(r'\n{3,}', replace_blank_lines, text)
         return text
 
+    def _escape_non_html_angle_brackets(self, text):
+        """
+        Replace angle-bracket patterns that aren't valid HTML/Markdown tags
+        with 〈〉 so pypandoc doesn't swallow them.
+
+        Japanese novels use 〈〉 for titles/skills (e.g. 〈転生者〉) but the LLM
+        sometimes translates them as <Reincarnator> which becomes an invisible
+        HTML element.
+        """
+        import re
+
+        # Known HTML tags that should be preserved (lowercase)
+        html_tags = {
+            'a', 'abbr', 'b', 'blockquote', 'br', 'code', 'dd', 'del', 'div',
+            'dl', 'dt', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i',
+            'img', 'ins', 'li', 'ol', 'p', 'pre', 'q', 'rp', 'rt', 'ruby',
+            's', 'small', 'span', 'strong', 'sub', 'sup', 'table', 'tbody',
+            'td', 'th', 'thead', 'tr', 'u', 'ul',
+        }
+
+        def replace_tag(match):
+            full = match.group(0)
+            closing = match.group(1) or ''
+            tag_name = match.group(2).lower()
+            if tag_name in html_tags:
+                return full  # keep real HTML tags
+            # Replace with fullwidth angle brackets
+            return '〈' + closing + match.group(2) + (match.group(3) or '') + '〉'
+
+        # Match <tag>, </tag>, <tag attr="...">, but not already-escaped &lt;
+        text = re.sub(r'<(/?)(\w+)([^>]*)>', replace_tag, text)
+        return text
+
     def create_xhtml_chapter(self, chapter_number, translated_chunks, original_xhtml):
         """Create XHTML file from translated markdown."""
         try:
@@ -381,6 +475,14 @@ class TranslationWorker(QObject):
 
             # Preserve multiple consecutive blank lines
             full_translation = self._preserve_blank_lines(full_translation)
+
+            # Escape non-HTML angle brackets (e.g. <Reincarnator> from translated 〈転生者〉)
+            # so pypandoc doesn't swallow them as HTML tags
+            full_translation = self._escape_non_html_angle_brackets(full_translation)
+
+            # Replace --- horizontal rules with *** to prevent Pandoc from
+            # interpreting them as YAML front matter delimiters
+            full_translation = re.sub(r'^---+\s*$', '***', full_translation, flags=re.MULTILINE)
 
             # Convert markdown → XHTML using pypandoc
             xhtml_body = pypandoc.convert_text(
@@ -457,7 +559,8 @@ class TranslationWorker(QObject):
             self.update_progress.emit(f"\nJSON Parse Error: {str(e)}\n", self.worker_id, "red")
             return None
 
-    def translate_chunk(self, chunk, current_chapter_chunks, current_chapter_translations):
+    def translate_chunk(self, chunk, current_chapter_chunks, current_chapter_translations,
+                        chapter_number=None, chunk_index=1):
         """Translate a single chunk of text."""
         if not self.endpoint_config['api_key']:
             self.update_progress.emit("❌ Error: No API key provided\n", self.worker_id, "red")
@@ -558,8 +661,35 @@ class TranslationWorker(QObject):
                     }, ensure_ascii=False)
                 })
 
+        # Determine TOC entries for this chunk (first chunk only)
+        toc_entries = None
+        if chunk_index == 1 and chapter_number and chapter_number in self.toc_map:
+            toc_entries = self.toc_map[chapter_number]
+
+        # Inject TOC context into messages if we have entries
+        if toc_entries:
+            # Add previous TOC translations for naming consistency
+            prev_toc = self._get_previous_toc_entries(chapter_number)
+            toc_message_parts = []
+            if prev_toc:
+                toc_message_parts.append("Previously translated TOC entries (for naming consistency):")
+                for entry in prev_toc:
+                    toc_message_parts.append(f"- {entry['original']} → {entry['translated']}")
+                toc_message_parts.append("")
+
+            toc_message_parts.append("TOC entries for this chapter to translate:")
+            toc_message_parts.append(json.dumps(toc_entries, ensure_ascii=False, indent=2))
+
+            base_messages.append({"role": "user", "content": "\n".join(toc_message_parts)})
+
+            self.update_progress.emit(
+                f"📑 Including {len(toc_entries)} TOC entries for inline translation"
+                + (f" (with {len(prev_toc)} previous for consistency)" if prev_toc else "") + "\n",
+                self.worker_id, "blue"
+            )
+
         # Build instruction
-        instruction, json_format_instruction, context_notes_system_instruction = self._build_instruction()
+        instruction, json_format_instruction, context_notes_system_instruction = self._build_instruction(toc_entries=toc_entries)
 
         # If power_steering is disabled, add JSON format and context/notes instructions to system prompt
         # If power_steering is enabled, they stay in the user instruction (default behavior)
@@ -581,10 +711,32 @@ class TranslationWorker(QObject):
         ])
 
         # Attempt translation with provider fallback
-        return self._attempt_translation(base_messages)
+        self._last_toc_response = None
+        result = self._attempt_translation(base_messages)
 
-    def _build_instruction(self):
-        """Build comprehensive instruction for translation."""
+        # Process inline TOC entries from response
+        if result and toc_entries and self._last_toc_response and chapter_number:
+            toc_translated = self._last_toc_response
+            if isinstance(toc_translated, list):
+                self.toc_translations[chapter_number] = toc_translated
+                for entry in toc_translated:
+                    original = entry.get('original', '')
+                    translated = entry.get('translated', '')
+                    if original and translated:
+                        self.toc_entry_translated.emit(chapter_number, original, translated)
+                        self.update_progress.emit(
+                            f"📑 TOC: {original} → {translated}\n",
+                            self.worker_id, "green"
+                        )
+
+        return result
+
+    def _build_instruction(self, toc_entries=None):
+        """Build comprehensive instruction for translation.
+
+        Args:
+            toc_entries: Optional list of TOC entries for this chapter (first chunk only).
+        """
         # Create the JSON schema based on enabled modes
         json_schema = {}
 
@@ -624,6 +776,16 @@ class TranslationWorker(QObject):
         # Always include complete_translation
         json_schema["complete_translation"] = "the_translated_text_here"
 
+        # Include toc_entries in schema if TOC entries are provided for this chunk
+        has_toc = toc_entries is not None and len(toc_entries) > 0
+        if has_toc:
+            json_schema["toc_entries"] = [
+                {
+                    "original": "original_toc_title",
+                    "translated": "translated_toc_title"
+                }
+            ]
+
         # Build the comprehensive instruction
         instruction_parts = []
         context_notes_instruction_parts = []  # For power steering
@@ -656,6 +818,13 @@ class TranslationWorker(QObject):
         complete_translation_instr = COMPLETE_TRANSLATION_INSTRUCTION.format(number=instruction_number)
         instruction_parts.append(complete_translation_instr)
         context_notes_instruction_parts.append(complete_translation_instr)
+        instruction_number += 1
+
+        # TOC instruction - only when TOC entries are provided
+        if has_toc:
+            toc_instr = TOC_INSTRUCTION.format(number=instruction_number)
+            instruction_parts.append(toc_instr)
+            context_notes_instruction_parts.append(toc_instr)
 
         notes_instruction = ""
         if self.notes_mode:
@@ -878,6 +1047,9 @@ class TranslationWorker(QObject):
                                 update_callback=lambda msg: self.update_progress.emit(f"{msg}\n", self.worker_id, "blue")
                             )
                             self.notes_updated.emit()
+
+                        # Store any TOC entries from the response for caller to pick up
+                        self._last_toc_response = json_data.get('toc_entries', None)
 
                         return json_data['complete_translation']
 
