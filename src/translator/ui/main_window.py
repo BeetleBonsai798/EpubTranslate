@@ -3,9 +3,11 @@
 import os
 import sys
 import json
+import logging
 import queue
 import threading
 import time
+import traceback
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
                              QFileDialog, QCheckBox, QSpinBox, QVBoxLayout, QHBoxLayout,
@@ -15,10 +17,12 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLine
 from PySide6.QtGui import QFont, QAction, QTextCursor
 from ebooklib import epub
 
-from ..config import ConfigManager
+from ..config import ConfigManager, OPENROUTER_BASE_URL, DEFAULT_PROVIDERS
 from ..api import OpenRouterFetcher
 from ..core import TranslationWorker
 from .chapter_overview_widget import ChapterOverviewWidget
+
+logger = logging.getLogger(__name__)
 
 
 class EpubTranslatorApp(QMainWindow):
@@ -841,6 +845,11 @@ class EpubTranslatorApp(QMainWindow):
                 if os.path.exists(os.path.join(output_folder, "xhtml", f"{i}.xhtml")):
                     completed_chapters.append(i)
 
+        # Get config but strip sensitive keys before saving to session file
+        session_config = self.get_config_from_ui()
+        session_config.pop('api_key', None)
+        session_config.pop('custom_endpoint_key', None)
+
         session_data = {
             'epub_path': epub_path,
             'epub_name': epub_name,
@@ -848,7 +857,7 @@ class EpubTranslatorApp(QMainWindow):
             'completed_chapters': completed_chapters,
             'output_folder': output_folder,
             'last_completed': max(completed_chapters) if completed_chapters else 0,
-            'config': self.get_config_from_ui(),
+            'config': session_config,
             'timestamp': str(time.time())
         }
 
@@ -1269,11 +1278,11 @@ class EpubTranslatorApp(QMainWindow):
             selected_providers = self.get_selected_providers()
             if not selected_providers:
                 QMessageBox.warning(self, "Warning", "No providers selected. Using default providers.")
-                selected_providers = self.config['selected_providers']
+                selected_providers = self.config.get('selected_providers') or list(DEFAULT_PROVIDERS)
 
             endpoint_config = {
                 'use_custom': False,
-                'base_url': "https://openrouter.ai/api/v1",
+                'base_url': OPENROUTER_BASE_URL,
                 'api_key': api_key
             }
 
@@ -1383,7 +1392,7 @@ class EpubTranslatorApp(QMainWindow):
                 previous_toc_count=self.previous_toc_spin.value()
             )
 
-            thread = threading.Thread(target=worker.run)
+            thread = threading.Thread(target=worker.run, daemon=True)
 
             # Connect signals
             worker.update_progress.connect(
@@ -1413,7 +1422,14 @@ class EpubTranslatorApp(QMainWindow):
         """Stop all translation workers."""
         for worker_id, w in self.workers.items():
             w['worker'].stop()
-            w['thread'].join()
+
+        # Join with a short timeout so the GUI doesn't freeze
+        for worker_id, w in list(self.workers.items()):
+            w['thread'].join(timeout=2.0)
+            if w['thread'].is_alive():
+                tab_index = w.get('tab_index')
+                if tab_index is not None:
+                    self.tabs.setTabText(tab_index, f"Worker {worker_id + 1} ⏳ stopping...")
         self.workers.clear()
 
     def create_tab(self, worker_id):
@@ -1600,10 +1616,10 @@ class EpubTranslatorApp(QMainWindow):
 
             # Check if xhtml folder exists and has files
             if not os.path.exists(xhtml_folder) or not os.listdir(xhtml_folder):
-                print("No translated XHTML files found, skipping EPUB rebuild")
+                logger.warning("No translated XHTML files found, skipping EPUB rebuild")
                 return
 
-            print(f"🔨 Rebuilding EPUB from translated XHTML files...")
+            logger.info("Rebuilding EPUB from translated XHTML files...")
 
             # Create rebuilder
             rebuilder = EpubRebuilder(self.epub_path)
@@ -1611,7 +1627,7 @@ class EpubTranslatorApp(QMainWindow):
             # Update with translated XHTML
             translated_map = rebuilder.update_with_translated_xhtml(xhtml_folder)
 
-            print(f"✓ Updated {len(translated_map)} chapters in EPUB")
+            logger.info(f"Updated {len(translated_map)} chapters in EPUB")
 
             # Load inline TOC translations from disk
             toc_path = os.path.join(output_folder, "context", f"{epub_name}_toc.json")
@@ -1622,18 +1638,18 @@ class EpubTranslatorApp(QMainWindow):
                         inline_toc = json.load(f)
                         inline_toc = {int(k): v for k, v in inline_toc.items()}
                 except Exception as e:
-                    print(f"⚠️ Could not load inline TOC translations: {e}")
+                    logger.warning(f"Could not load inline TOC translations: {e}")
 
             if inline_toc:
                 # Use inline TOC translations - no extra API calls needed
-                print(f"📑 Applying {sum(len(v) for v in inline_toc.values())} inline TOC translations...")
+                logger.info(f"Applying {sum(len(v) for v in inline_toc.values())} inline TOC translations...")
                 count = self._apply_inline_toc_translations(rebuilder.original_book, inline_toc)
-                print(f"✓ Applied {count} TOC translations")
+                logger.info(f"Applied {count} TOC translations")
 
                 # Write final EPUB directly
                 output_epub = os.path.join(output_folder, f"{epub_name}_translated.epub")
                 rebuilder.write_epub(output_epub)
-                print(f"✅ Translated EPUB created: {output_epub}")
+                logger.info(f"Translated EPUB created: {output_epub}")
 
                 QMessageBox.information(
                     self,
@@ -1642,13 +1658,11 @@ class EpubTranslatorApp(QMainWindow):
                 )
             else:
                 # Fall back to old batch TOC translation
-                print("📑 No inline TOC translations found, falling back to batch TOC translation...")
+                logger.info("No inline TOC translations found, falling back to batch TOC translation...")
                 self._build_epub_with_batch_toc(rebuilder, output_folder, epub_name, translated_map)
 
         except Exception as e:
-            print(f"❌ Error rebuilding EPUB: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Error rebuilding EPUB: {e}", exc_info=True)
             QMessageBox.warning(
                 self,
                 "EPUB Rebuild Error",
@@ -1670,7 +1684,7 @@ class EpubTranslatorApp(QMainWindow):
             model = self.custom_endpoint_model.text().strip()
         else:
             api_key = self.api_key_entry.text().strip()
-            base_url = "https://openrouter.ai/api/v1"
+            base_url = OPENROUTER_BASE_URL
             model = self.model_combo.currentText().strip()
 
         endpoint_config = {
@@ -1685,7 +1699,7 @@ class EpubTranslatorApp(QMainWindow):
             selected_providers.append(self.selected_providers_list.item(i).text())
 
         if not selected_providers:
-            selected_providers = ['deepseek/deepseek-v3.2-exp']
+            selected_providers = list(DEFAULT_PROVIDERS)
 
         # Create context manager to load existing context
         context_manager = ContextManager(
@@ -1721,7 +1735,7 @@ class EpubTranslatorApp(QMainWindow):
         )
 
         # Create thread
-        toc_thread = threading.Thread(target=self.toc_worker.run)
+        toc_thread = threading.Thread(target=self.toc_worker.run, daemon=True)
 
         # Connect signals
         self.toc_worker.update_progress.connect(
@@ -1807,7 +1821,7 @@ class EpubTranslatorApp(QMainWindow):
                 output_epub = os.path.join(output_folder, f"{epub_name}_translated.epub")
                 rebuilder.write_epub(output_epub)
 
-                print(f"✅ Translated EPUB created: {output_epub}")
+                logger.info(f"Translated EPUB created: {output_epub}")
 
                 QMessageBox.information(
                     self,
@@ -1815,10 +1829,7 @@ class EpubTranslatorApp(QMainWindow):
                     f"EPUB built successfully!\n\nTranslated EPUB saved to:\n{output_epub}"
                 )
             except Exception as e:
-                print(f"❌ Error writing EPUB: {str(e)}")
-                import traceback
-                traceback.print_exc()
-
+                logger.error(f"Error writing EPUB: {e}", exc_info=True)
                 QMessageBox.warning(
                     self,
                     "EPUB Write Error",

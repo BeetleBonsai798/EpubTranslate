@@ -7,6 +7,7 @@ from openai import OpenAI
 from ebooklib import epub
 from bs4 import BeautifulSoup
 
+from ..config import DEFAULT_PROVIDERS
 from .context_manager import ContextManager
 from .context_filter import ContextFilter
 
@@ -50,7 +51,7 @@ class TocTranslationWorker(QObject):
         if providers_list and len(providers_list) > 0:
             self.providers = providers_list
         else:
-            self.providers = ['deepseek/deepseek-v3.2-exp']
+            self.providers = list(DEFAULT_PROVIDERS)
 
     def _setup_context_filter(self):
         self._context_filter = ContextFilter()

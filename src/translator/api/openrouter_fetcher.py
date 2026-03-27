@@ -1,9 +1,14 @@
 """OpenRouter API fetcher for models and providers."""
 
 import json
+import logging
 import requests
 import urllib.parse
 from PySide6.QtCore import QThread, Signal
+
+from ..config import OPENROUTER_MODELS_URL
+
+logger = logging.getLogger(__name__)
 
 
 class OpenRouterFetcher(QThread):
@@ -33,7 +38,7 @@ class OpenRouterFetcher(QThread):
         """Fetch available models from OpenRouter."""
         self.progress_updated.emit("Fetching models from OpenRouter...")
         try:
-            response = requests.get("https://openrouter.ai/api/v1/models", timeout=30)
+            response = requests.get(OPENROUTER_MODELS_URL, timeout=30)
             response.raise_for_status()
             data = response.json()
 
@@ -76,12 +81,12 @@ class OpenRouterFetcher(QThread):
                 author_encoded = urllib.parse.quote(author, safe='')
                 slug_encoded = urllib.parse.quote(slug, safe='')
 
-                url = f"https://openrouter.ai/api/v1/models/{author_encoded}/{slug_encoded}/endpoints"
-                print(f"Requesting URL: {url}")
+                url = f"{OPENROUTER_MODELS_URL}/{author_encoded}/{slug_encoded}/endpoints"
+                logger.debug(f"Requesting URL: {url}")
                 self.progress_updated.emit(f"Requesting: {url}")
 
                 response = requests.get(url, timeout=30)
-                print(f"Response status: {response.status_code}")
+                logger.debug(f"Response status: {response.status_code}")
                 response.raise_for_status()
 
                 data = response.json()
@@ -91,10 +96,10 @@ class OpenRouterFetcher(QThread):
                 if isinstance(data, dict) and 'data' in data:
                     model_data = data['data']
                     if 'endpoints' in model_data and isinstance(model_data['endpoints'], list):
-                        print(f"Found {len(model_data['endpoints'])} endpoints")
+                        logger.debug(f"Found {len(model_data['endpoints'])} endpoints")
 
                         for i, endpoint in enumerate(model_data['endpoints']):
-                            print(f"Processing endpoint {i}: {endpoint.get('provider_name', 'Unknown')}")
+                            logger.debug(f"Processing endpoint {i}: {endpoint.get('provider_name', 'Unknown')}")
 
                             if isinstance(endpoint, dict) and 'provider_name' in endpoint:
                                 provider_name = endpoint['provider_name']
@@ -135,17 +140,17 @@ class OpenRouterFetcher(QThread):
                                     'uptime': uptime_str
                                 }
                                 provider_details.append(detail_info)
-                                print(f"Added provider: {provider_id} - {pricing_info}")
+                                logger.debug(f"Added provider: {provider_id} - {pricing_info}")
                             else:
-                                print(f"Invalid endpoint structure: {endpoint}")
+                                logger.debug(f"Invalid endpoint structure: {endpoint}")
                     else:
-                        print(f"No 'endpoints' field found in model data. Available keys: {list(model_data.keys())}")
+                        logger.debug(f"No 'endpoints' field found in model data. Available keys: {list(model_data.keys())}")
                 else:
-                    print(f"Invalid response structure. Expected dict with 'data' key, got: {type(data)}")
+                    logger.debug(f"Invalid response structure. Expected dict with 'data' key, got: {type(data)}")
                     if isinstance(data, dict):
-                        print(f"Available keys: {list(data.keys())}")
+                        logger.debug(f"Available keys: {list(data.keys())}")
 
-                print(f"Final providers list: {providers}")
+                logger.debug(f"Final providers list: {providers}")
 
                 if providers:
                     self.providers_fetched.emit(clean_model_id, providers)

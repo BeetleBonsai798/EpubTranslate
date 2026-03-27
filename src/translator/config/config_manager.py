@@ -8,6 +8,10 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+DEFAULT_PROVIDERS = ['novita/fp8', 'siliconflow/fp8', 'deepinfra/fp4', 'gmicloud/fp8']
+
 
 class ConfigManager:
     """Manages application configuration, separating secrets from settings.
@@ -32,12 +36,7 @@ class ConfigManager:
             "top_p": 0.95,
             "top_k": 0,
             "timeout": 10.0,
-            "selected_providers": [
-                "novita/fp8",
-                "siliconflow/fp8",
-                "deepinfra/fp4",
-                "gmicloud/fp8"
-            ],
+            "selected_providers": list(DEFAULT_PROVIDERS),
             "retries_per_provider": 2,
             "context_mode": True,
             "notes_mode": False,

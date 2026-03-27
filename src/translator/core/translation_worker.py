@@ -4,11 +4,13 @@ import os
 import re
 import json
 import queue
+import threading
 import pypandoc
 from PySide6.QtCore import QObject, Signal
 from openai import OpenAI
 from bs4 import BeautifulSoup
 
+from ..config import OPENROUTER_BASE_URL, DEFAULT_PROVIDERS
 from .context_manager import ContextManager
 from .context_filter import ContextFilter
 from .prompts import (
@@ -29,6 +31,8 @@ from ..utils.token_counter import num_tokens_from_string, split_chapter
 
 class TranslationWorker(QObject):
     """Worker thread for translating chapters."""
+
+    _toc_file_lock = threading.Lock()
 
     update_progress = Signal(str, int, str)
     finished = Signal(int)
@@ -81,15 +85,14 @@ class TranslationWorker(QObject):
         # Endpoint configuration
         self.endpoint_config = endpoint_config or {
             'use_custom': False,
-            'base_url': "https://openrouter.ai/api/v1",
+            'base_url': OPENROUTER_BASE_URL,
             'api_key': api_key
         }
 
         if providers_list and len(providers_list) > 0:
             self.providers = providers_list
         else:
-            self.providers = ['targon/fp8', 'lambda/fp8', 'gmicloud/fp8', 'baseten/fp8',
-                              'parasail/fp8', 'fireworks', 'chutes/fp8']
+            self.providers = list(DEFAULT_PROVIDERS)
 
         # Initialize context manager
         self.context_manager = ContextManager(
@@ -120,29 +123,37 @@ class TranslationWorker(QObject):
                     self.toc_translations = json.load(f)
                     # Keys are strings from JSON, convert to int
                     self.toc_translations = {int(k): v for k, v in self.toc_translations.items()}
-            except Exception:
+            except Exception as e:
+                self.update_progress.emit(
+                    f"⚠️ Warning: Could not load TOC translations: {e}\n",
+                    self.worker_id, "orange"
+                )
                 self.toc_translations = {}
 
     def _save_toc_translations(self):
-        """Save TOC translations to disk (read-merge-write for multi-worker safety)."""
+        """Save TOC translations to disk (read-merge-write with lock for multi-worker safety)."""
         context_folder = os.path.join(self.output_folder, "context")
         os.makedirs(context_folder, exist_ok=True)
         toc_path = os.path.join(context_folder, f"{self.epub_name}_toc.json")
 
-        # Read existing file to merge (another worker may have written)
-        existing = {}
-        if os.path.exists(toc_path):
-            try:
-                with open(toc_path, 'r', encoding='utf-8') as f:
-                    existing = {int(k): v for k, v in json.load(f).items()}
-            except Exception:
-                pass
+        with TranslationWorker._toc_file_lock:
+            # Read existing file to merge (another worker may have written)
+            existing = {}
+            if os.path.exists(toc_path):
+                try:
+                    with open(toc_path, 'r', encoding='utf-8') as f:
+                        existing = {int(k): v for k, v in json.load(f).items()}
+                except Exception as e:
+                    self.update_progress.emit(
+                        f"⚠️ Warning: Could not read existing TOC file: {e}\n",
+                        self.worker_id, "orange"
+                    )
 
-        # Merge: this worker's translations take priority for its chapters
-        existing.update(self.toc_translations)
+            # Merge: this worker's translations take priority for its chapters
+            existing.update(self.toc_translations)
 
-        with open(toc_path, 'w', encoding='utf-8') as f:
-            json.dump(existing, f, ensure_ascii=False, indent=2)
+            with open(toc_path, 'w', encoding='utf-8') as f:
+                json.dump(existing, f, ensure_ascii=False, indent=2)
 
     def _get_previous_toc_entries(self, current_chapter_number):
         """Get the last N translated TOC entries before the current chapter for consistency."""
@@ -222,12 +233,19 @@ class TranslationWorker(QObject):
                 original_chapter = self._preprocess_svg_images(original_chapter)
 
                 # Convert to markdown for consistency
-                original_markdown = pypandoc.convert_text(
-                    original_chapter,
-                    'markdown',
-                    format='html',
-                    extra_args=['--wrap=preserve']
-                )
+                try:
+                    original_markdown = pypandoc.convert_text(
+                        original_chapter,
+                        'markdown',
+                        format='html',
+                        extra_args=['--wrap=preserve']
+                    )
+                except Exception as e:
+                    self.update_progress.emit(
+                        f"⚠️ Pandoc failed converting previous chapter {i}: {e}\n",
+                        self.worker_id, "orange"
+                    )
+                    continue
 
                 # Load translated XHTML instead of DOCX
                 translated_file = os.path.join(self.xhtml_folder, f"{i}.xhtml")
@@ -340,12 +358,20 @@ class TranslationWorker(QObject):
         chapter = self._preprocess_svg_images(chapter)
 
         # Convert XHTML to Markdown using pypandoc
-        chapter_markdown = pypandoc.convert_text(
-            chapter,
-            'markdown',
-            format='html',
-            extra_args=['--wrap=preserve']
-        )
+        try:
+            chapter_markdown = pypandoc.convert_text(
+                chapter,
+                'markdown',
+                format='html',
+                extra_args=['--wrap=preserve']
+            )
+        except Exception as e:
+            import traceback
+            self.update_progress.emit(
+                f"❌ Pandoc conversion failed for chapter {chapter_number}: {e}\n{traceback.format_exc()}",
+                self.worker_id, "red"
+            )
+            return
 
         chunks = split_chapter(chapter_markdown, max_tokens=self.max_tokens_per_chunk)
         total_chunks = len(chunks)
@@ -536,12 +562,11 @@ class TranslationWorker(QObject):
             )
 
         except Exception as e:
+            import traceback
             self.update_progress.emit(
-                f"❌ Error creating XHTML for chapter {chapter_number}: {str(e)}\n",
+                f"❌ Error creating XHTML for chapter {chapter_number}: {str(e)}\n{traceback.format_exc()}",
                 self.worker_id, "red"
             )
-            import traceback
-            traceback.print_exc()
 
     def extract_json_from_response(self, response_text):
         """Extract JSON data from API response."""
@@ -565,9 +590,6 @@ class TranslationWorker(QObject):
         if not self.endpoint_config['api_key']:
             self.update_progress.emit("❌ Error: No API key provided\n", self.worker_id, "red")
             return None
-
-        client = OpenAI(api_key=self.endpoint_config['api_key'])
-        client.base_url = self.endpoint_config['base_url']
 
         # Build the base messages with conditional JSON instruction placement
         base_messages = [
