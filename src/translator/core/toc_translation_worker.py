@@ -23,7 +23,7 @@ class TocTranslationWorker(QObject):
     def __init__(self, original_book, translated_xhtml_map, context_manager, endpoint_config,
                  batch_size=30, providers_list=None, temperature=0.3, max_tokens=2000,
                  frequency_penalty=0.0, top_p=1.0, top_k=0, timeout=60.0, retries_per_provider=1,
-                 embedding_config=None):
+                 embedding_config=None, reasoning_config=None, json_output_mode='off'):
         super().__init__()
         self.original_book = original_book
         self.translated_xhtml_map = translated_xhtml_map
@@ -40,6 +40,15 @@ class TocTranslationWorker(QObject):
         self.top_k = top_k
         self.timeout = timeout
         self.retries_per_provider = retries_per_provider
+
+        # Reasoning + JSON-output configuration
+        self.reasoning_config = reasoning_config or {
+            'enabled': False,
+            'effort': 'medium',
+            'max_tokens': 0,
+            'exclude': False,
+        }
+        self.json_output_mode = json_output_mode
 
         # Context filtering
         self.embedding_config = embedding_config or {'enabled': False}
@@ -216,154 +225,253 @@ class TocTranslationWorker(QObject):
         # Provider rotation with retries
         api_key = self.endpoint_config['api_key']
         base_url = self.endpoint_config['base_url']
+        endpoint_type = self.endpoint_config.get('endpoint_type', 'openrouter')
+        model_id = self.endpoint_config.get('model', '')
 
         if not api_key:
             self.update_progress.emit("❌ Error: No API key configured", "red")
             return None
 
-        provider_index = 0
-        attempts = 0
-        max_total_attempts = len(self.providers) * self.retries_per_provider
+        # OpenRouter rotates through configured providers; DeepSeek and Custom
+        # have a single upstream so we just retry on `None`.
+        if endpoint_type == 'openrouter':
+            provider_list = self.providers
+        else:
+            provider_list = [None]
 
-        while attempts < max_total_attempts:
+        endpoint_label = {
+            'openrouter': 'OpenRouter',
+            'deepseek': 'DeepSeek',
+            'custom': 'custom endpoint',
+        }.get(endpoint_type, endpoint_type)
+
+        last_response_text = ""
+
+        for provider_index, current_provider in enumerate(provider_list):
             if not self._is_running:
                 return None
 
-            current_provider = self.providers[provider_index]
-            model = f"{current_provider}/{self.endpoint_config['model']}" if '/' not in self.endpoint_config['model'] else self.endpoint_config['model']
+            for retry_attempt in range(self.retries_per_provider):
+                if not self._is_running:
+                    return None
 
-            try:
-                self.update_progress.emit(f"🔄 Calling API with provider: {current_provider}, model: {model}", "yellow")
-                self.update_progress.emit(f"   Attempt {(attempts % self.retries_per_provider) + 1}/{self.retries_per_provider} for this provider", "yellow")
+                attempt_num = retry_attempt + 1
+                if current_provider:
+                    self.update_progress.emit(
+                        f"🔄 Provider {provider_index + 1}/{len(provider_list)}: {current_provider} - Attempt {attempt_num}/{self.retries_per_provider}",
+                        "yellow"
+                    )
+                else:
+                    self.update_progress.emit(
+                        f"🔄 {endpoint_label} - Attempt {attempt_num}/{self.retries_per_provider}",
+                        "yellow"
+                    )
 
-                client = OpenAI(api_key=api_key, base_url=base_url, timeout=self.timeout)
+                response_text = ""
+                reasoning_text = ""
 
-                # Build API parameters
-                api_params = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    "temperature": self.temperature,
-                    "max_tokens": self.max_tokens,
-                    "stream": True
-                }
-
-                # Add optional parameters if not default
-                if self.frequency_penalty != 0.0:
-                    api_params["frequency_penalty"] = self.frequency_penalty
-                if self.top_p != 1.0:
-                    api_params["top_p"] = self.top_p
-                if self.top_k != 0:
-                    api_params["top_k"] = self.top_k
-
-                # Try to use JSON mode if available
                 try:
-                    api_params["response_format"] = {"type": "json_object"}
-                except Exception:
-                    pass
+                    client = OpenAI(api_key=api_key, base_url=base_url, timeout=self.timeout)
 
-                # Add extra headers for OpenRouter
-                extra_headers = {}
-                if 'openrouter.ai' in base_url:
-                    extra_headers = {
-                        "HTTP-Referer": "https://github.com/BeetleBonsai798/EpubTranslate",
-                        "X-Title": "EpubTranslate"
+                    api_params = {
+                        "model": model_id,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        "temperature": self.temperature,
+                        "max_tokens": self.max_tokens,
+                        "stream": True
                     }
 
-                if extra_headers:
-                    api_params["extra_headers"] = extra_headers
+                    if self.frequency_penalty != 0.0:
+                        api_params["frequency_penalty"] = self.frequency_penalty
+                    if self.top_p != 1.0:
+                        api_params["top_p"] = self.top_p
 
-                response_stream = client.chat.completions.create(**api_params)
+                    extra_body = {}
+                    if self.top_k != 0:
+                        extra_body['top_k'] = self.top_k
 
-                # Stream response with robust error handling
-                response_text = ""
-                chunk_count = 0
-                self.update_progress.emit("\n[STREAMING RESPONSE]:", "cyan")
+                    reasoning_enabled = self.reasoning_config.get('enabled', False)
 
-                try:
-                    for chunk_data in response_stream:
-                        if not self._is_running:
-                            return None
-
-                        chunk_count += 1
-
-                        # Handle different streaming formats safely
-                        try:
-                            if (hasattr(chunk_data, 'choices') and
-                                    chunk_data.choices is not None and
-                                    len(chunk_data.choices) > 0):
-
-                                choice = chunk_data.choices[0]
-
-                                if (hasattr(choice, 'delta') and
-                                        choice.delta is not None and
-                                        hasattr(choice.delta, 'content') and
-                                        choice.delta.content is not None):
-                                    content = choice.delta.content
-                                    response_text += content
-                                    self.update_progress.emit(content, "white")
+                    if endpoint_type == 'openrouter':
+                        if current_provider:
+                            extra_body['provider'] = {
+                                'order': [current_provider],
+                                'allow_fallbacks': False
+                            }
+                        if reasoning_enabled:
+                            r = {}
+                            if self.reasoning_config.get('max_tokens', 0) > 0:
+                                r['max_tokens'] = self.reasoning_config['max_tokens']
                             else:
+                                r['effort'] = self.reasoning_config.get('effort', 'medium')
+                            if self.reasoning_config.get('exclude'):
+                                r['exclude'] = True
+                            extra_body['reasoning'] = r
+                    elif endpoint_type == 'deepseek':
+                        if reasoning_enabled:
+                            extra_body['thinking'] = {'type': 'enabled'}
+                            api_params['reasoning_effort'] = self.reasoning_config.get('effort', 'high')
+                        else:
+                            extra_body['thinking'] = {'type': 'disabled'}
+
+                    # TOC translation depends on JSON parsing; default to json_object
+                    # whenever the user hasn't asked for json_schema strict mode.
+                    if self.json_output_mode == 'json_schema' and endpoint_type == 'openrouter':
+                        api_params['response_format'] = {
+                            'type': 'json_schema',
+                            'json_schema': {
+                                'name': 'toc_translations',
+                                'strict': True,
+                                'schema': {
+                                    'type': 'object',
+                                    'properties': {
+                                        'translations': {
+                                            'type': 'array',
+                                            'items': {
+                                                'type': 'object',
+                                                'properties': {
+                                                    'index': {'type': 'integer'},
+                                                    'translated': {'type': 'string'},
+                                                },
+                                                'required': ['index', 'translated'],
+                                                'additionalProperties': False,
+                                            },
+                                        },
+                                    },
+                                    'required': ['translations'],
+                                    'additionalProperties': False,
+                                },
+                            },
+                        }
+                    else:
+                        api_params['response_format'] = {'type': 'json_object'}
+
+                    if extra_body:
+                        api_params['extra_body'] = extra_body
+
+                    if endpoint_type == 'openrouter':
+                        api_params['extra_headers'] = {
+                            "HTTP-Referer": "https://github.com/BeetleBonsai798/EpubTranslate",
+                            "X-Title": "EpubTranslate"
+                        }
+
+                    response_stream = client.chat.completions.create(**api_params)
+
+                    chunk_count = 0
+                    reasoning_started = False
+                    content_started = False
+                    self.update_progress.emit("\n[STREAMING RESPONSE]:", "cyan")
+
+                    try:
+                        for chunk_data in response_stream:
+                            if not self._is_running:
+                                return None
+
+                            chunk_count += 1
+
+                            try:
+                                if (hasattr(chunk_data, 'choices') and
+                                        chunk_data.choices is not None and
+                                        len(chunk_data.choices) > 0):
+
+                                    choice = chunk_data.choices[0]
+
+                                    if hasattr(choice, 'delta') and choice.delta is not None:
+                                        reasoning_chunk = (
+                                            getattr(choice.delta, 'reasoning_content', None)
+                                            or getattr(choice.delta, 'reasoning', None)
+                                        )
+                                        if reasoning_chunk:
+                                            if not reasoning_started:
+                                                self.update_progress.emit("\n💭 [REASONING]\n", "gray")
+                                                reasoning_started = True
+                                            reasoning_text += reasoning_chunk
+                                            self.update_progress.emit(reasoning_chunk, "gray")
+
+                                        content = getattr(choice.delta, 'content', None)
+                                        if content:
+                                            if reasoning_started and not content_started:
+                                                self.update_progress.emit("\n📝 [RESPONSE]\n", "white")
+                                                content_started = True
+                                            response_text += content
+                                            self.update_progress.emit(content, "white")
+                                else:
+                                    continue
+
+                            except (AttributeError, IndexError, TypeError):
                                 continue
 
-                        except (AttributeError, IndexError, TypeError):
-                            continue
+                    except Exception as stream_error:
+                        self.update_progress.emit(
+                            f"\n⚠️ Stream error: {str(stream_error)}, but may have received complete response\n",
+                            "orange"
+                        )
 
-                except Exception as stream_error:
+                    if chunk_count > 0:
+                        self.update_progress.emit(
+                            f"\n📊 Processed {chunk_count} stream chunks\n",
+                            "white"
+                        )
+
+                    self.update_progress.emit("\n" + "="*80 + "\n", "green")
+
+                    last_response_text = response_text
+
+                    cleaned_response = self.clean_json_response(response_text)
+
+                    if reasoning_text:
+                        combined_raw = (
+                            "--- REASONING ---\n"
+                            f"{reasoning_text}\n\n"
+                            "--- RESPONSE ---\n"
+                            f"{cleaned_response}"
+                        )
+                    else:
+                        combined_raw = cleaned_response
+                    self.raw_json_updated.emit(combined_raw)
+
+                    parsed = json.loads(cleaned_response)
+
+                    if 'translations' not in parsed:
+                        self.update_progress.emit("⚠️ Warning: Response missing 'translations' field", "orange")
+                        raise ValueError("Response missing 'translations' field")
+
                     self.update_progress.emit(
-                        f"\n⚠️ Stream error: {str(stream_error)}, but may have received complete response\n",
-                        "orange"
+                        f"✅ Successfully parsed {len(parsed['translations'])} translations", "green"
                     )
+                    return parsed['translations']
 
-                # Log how many chunks were processed
-                if chunk_count > 0:
-                    self.update_progress.emit(
-                        f"\n📊 Processed {chunk_count} stream chunks\n",
-                        "white"
-                    )
+                except json.JSONDecodeError as e:
+                    self.update_progress.emit(f"❌ JSON Parse Error: {str(e)}", "red")
+                    self.update_progress.emit(f"   Raw response: {last_response_text[:200]}...", "red")
+                    if retry_attempt < self.retries_per_provider - 1:
+                        self.update_progress.emit("🔄 Retrying same provider...", "orange")
+                    elif provider_index < len(provider_list) - 1:
+                        next_provider = provider_list[provider_index + 1]
+                        self.update_progress.emit(
+                            f"🔄 Moving to next provider: {next_provider}",
+                            "orange"
+                        )
 
-                self.update_progress.emit("\n" + "="*80 + "\n", "green")
+                except Exception as e:
+                    self.update_progress.emit(f"❌ API Error: {str(e)}", "red")
+                    if retry_attempt < self.retries_per_provider - 1:
+                        self.update_progress.emit("🔄 Retrying same provider...", "orange")
+                    elif provider_index < len(provider_list) - 1:
+                        next_provider = provider_list[provider_index + 1]
+                        self.update_progress.emit(
+                            f"🔄 Moving to next provider: {next_provider}",
+                            "orange"
+                        )
 
-                # Clean and parse response
-                cleaned_response = self.clean_json_response(response_text)
-
-                # Emit raw JSON for display
-                self.raw_json_updated.emit(cleaned_response)
-
-                # Parse response
-                parsed = json.loads(cleaned_response)
-
-                if 'translations' not in parsed:
-                    self.update_progress.emit("⚠️ Warning: Response missing 'translations' field", "orange")
-                    raise ValueError("Response missing 'translations' field")
-
-                self.update_progress.emit(f"✅ Successfully parsed {len(parsed['translations'])} translations", "green")
-                return parsed['translations']
-
-            except json.JSONDecodeError as e:
-                self.update_progress.emit(f"❌ JSON Parse Error: {str(e)}", "red")
-                self.update_progress.emit(f"   Raw response: {response_text[:200]}...", "red")
-                attempts += 1
-
-                if attempts % self.retries_per_provider == 0:
-                    provider_index = (provider_index + 1) % len(self.providers)
-                    self.update_progress.emit(f"🔄 Moving to next provider: {self.providers[provider_index]}", "orange")
-                else:
-                    self.update_progress.emit(f"🔄 Retrying with same provider...", "orange")
-
-            except Exception as e:
-                self.update_progress.emit(f"❌ API Error: {str(e)}", "red")
-                attempts += 1
-
-                if attempts % self.retries_per_provider == 0:
-                    provider_index = (provider_index + 1) % len(self.providers)
-                    if attempts < max_total_attempts:
-                        self.update_progress.emit(f"🔄 Moving to next provider: {self.providers[provider_index]}", "orange")
-                else:
-                    self.update_progress.emit(f"🔄 Retrying with same provider...", "orange")
-
-        self.update_progress.emit(f"❌ All retry attempts exhausted after {max_total_attempts} tries", "red")
+        max_total_attempts = len(provider_list) * self.retries_per_provider
+        self.update_progress.emit(
+            f"❌ All retry attempts exhausted after {max_total_attempts} tries",
+            "red"
+        )
         return None
 
     def translate_toc_item(self, item, translations_map):

@@ -51,7 +51,8 @@ class TranslationWorker(QObject):
                  temperature, max_tokens, frequency_penalty, top_p=1.0, top_k=0, timeout=60.0,
                  providers_list=None, api_key="", epub_book=None, endpoint_config=None,
                  retries_per_provider=1, embedding_config=None, base_prompt_position='bottom',
-                 toc_map=None, previous_toc_count=10):
+                 toc_map=None, previous_toc_count=10,
+                 reasoning_config=None, json_output_mode='off'):
         super().__init__()
         self.output_folder = output_folder
 
@@ -82,9 +83,18 @@ class TranslationWorker(QObject):
         self.retries_per_provider = retries_per_provider
         self.base_prompt_position = base_prompt_position
 
+        # Reasoning + JSON-output configuration
+        self.reasoning_config = reasoning_config or {
+            'enabled': False,
+            'effort': 'medium',
+            'max_tokens': 0,
+            'exclude': False,
+        }
+        self.json_output_mode = json_output_mode
+
         # Endpoint configuration
         self.endpoint_config = endpoint_config or {
-            'use_custom': False,
+            'endpoint_type': 'openrouter',
             'base_url': OPENROUTER_BASE_URL,
             'api_key': api_key
         }
@@ -734,7 +744,8 @@ class TranslationWorker(QObject):
 
         # Attempt translation with provider fallback
         self._last_toc_response = None
-        result = self._attempt_translation(base_messages)
+        has_toc = bool(toc_entries)
+        result = self._attempt_translation(base_messages, has_toc=has_toc)
 
         # Process inline TOC entries from response
         if result and toc_entries and self._last_toc_response and chapter_number:
@@ -895,15 +906,124 @@ class TranslationWorker(QObject):
 
         return full_instruction, json_format_instruction, context_notes_system_instruction
 
-    def _attempt_translation(self, base_messages):
+    def _build_json_schema(self, has_toc=False):
+        """Build a JSON schema for OpenRouter structured outputs (strict mode).
+
+        Mirrors the field set in _build_instruction so the model returns the same
+        shape we already parse downstream. Strict mode requires every property to
+        appear in `required` and `additionalProperties: false` everywhere.
+        """
+        properties = {}
+        required = []
+
+        if self.context_mode:
+            properties["characters"] = {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "original": {"type": "string"},
+                        "translated": {"type": "string"},
+                        "gender": {"type": "string", "enum": ["male", "female", "not_clear"]},
+                    },
+                    "required": ["original", "translated", "gender"],
+                    "additionalProperties": False,
+                },
+            }
+            properties["places"] = {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "original": {"type": "string"},
+                        "translated": {"type": "string"},
+                    },
+                    "required": ["original", "translated"],
+                    "additionalProperties": False,
+                },
+            }
+            properties["terms"] = {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "original": {"type": "string"},
+                        "translated": {"type": "string"},
+                        "category": {
+                            "type": "string",
+                            "enum": [
+                                "spell", "weapon", "skill", "technique",
+                                "ability", "item", "artifact", "race", "other",
+                            ],
+                        },
+                    },
+                    "required": ["original", "translated", "category"],
+                    "additionalProperties": False,
+                },
+            }
+            required.extend(["characters", "places", "terms"])
+
+        if self.notes_mode:
+            properties["notes"] = {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["add", "update", "delete"]},
+                        "key": {"type": "string"},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["action", "key", "note"],
+                    "additionalProperties": False,
+                },
+            }
+            required.append("notes")
+
+        properties["complete_translation"] = {"type": "string"}
+        required.append("complete_translation")
+
+        if has_toc:
+            properties["toc_entries"] = {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "original": {"type": "string"},
+                        "translated": {"type": "string"},
+                    },
+                    "required": ["original", "translated"],
+                    "additionalProperties": False,
+                },
+            }
+            required.append("toc_entries")
+
+        return {
+            "name": "translation_response",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            },
+        }
+
+    def _attempt_translation(self, base_messages, has_toc=False):
         """Attempt translation with provider fallback and per-provider retries."""
-        # Determine retry logic based on endpoint type
-        if self.endpoint_config['use_custom']:
-            # Custom endpoint - use retries_per_provider
-            provider_list = [None]
-        else:
-            # OpenRouter with providers
+        endpoint_type = self.endpoint_config.get('endpoint_type', 'openrouter')
+
+        # OpenRouter rotates through configured providers; DeepSeek and Custom
+        # have a single upstream so we just retry on `None`.
+        if endpoint_type == 'openrouter':
             provider_list = self.providers
+        else:
+            provider_list = [None]
+
+        endpoint_label = {
+            'openrouter': 'OpenRouter',
+            'deepseek': 'DeepSeek',
+            'custom': 'custom endpoint',
+        }.get(endpoint_type, endpoint_type)
 
         # Iterate through each provider
         for provider_index, current_provider in enumerate(provider_list):
@@ -923,7 +1043,7 @@ class TranslationWorker(QObject):
                     )
                 else:
                     self.update_progress.emit(
-                        f"\n🔄 Custom endpoint - Attempt {attempt_num}/{self.retries_per_provider}\n",
+                        f"\n🔄 {endpoint_label} - Attempt {attempt_num}/{self.retries_per_provider}\n",
                         self.worker_id, "blue"
                     )
 
@@ -933,10 +1053,8 @@ class TranslationWorker(QObject):
                 # Clean up any openrouter-specific stuff that might interfere
                 for msg in messages_for_provider:
                     msg.pop('prefix', None)
-                # print(messages_for_provider)
 
                 try:
-                    # print(messages_for_provider)
                     # Build request parameters
                     request_params = {
                         'model': self.model,
@@ -948,23 +1066,51 @@ class TranslationWorker(QObject):
                         'top_p': self.top_p,
                     }
 
-                    # print(messages_for_provider)
-
-                    # Initialize extra_body if needed
                     extra_body = {}
 
                     # Add top_k to extra_body if not 0 (0 means disabled)
                     if self.top_k > 0:
                         extra_body['top_k'] = self.top_k
 
-                    # Only add provider routing for OpenRouter
-                    if not self.endpoint_config['use_custom'] and current_provider:
-                        extra_body['provider'] = {
-                            'order': [current_provider],
-                            'allow_fallbacks': False
-                        }
+                    reasoning_enabled = self.reasoning_config.get('enabled', False)
 
-                    # Add extra_body to request_params if it has any content
+                    if endpoint_type == 'openrouter':
+                        if current_provider:
+                            extra_body['provider'] = {
+                                'order': [current_provider],
+                                'allow_fallbacks': False
+                            }
+                        if reasoning_enabled:
+                            r = {}
+                            if self.reasoning_config.get('max_tokens', 0) > 0:
+                                r['max_tokens'] = self.reasoning_config['max_tokens']
+                            else:
+                                r['effort'] = self.reasoning_config.get('effort', 'medium')
+                            if self.reasoning_config.get('exclude'):
+                                r['exclude'] = True
+                            extra_body['reasoning'] = r
+                    elif endpoint_type == 'deepseek':
+                        # DeepSeek v4 thinking mode is enabled by default — toggle explicitly
+                        if reasoning_enabled:
+                            extra_body['thinking'] = {'type': 'enabled'}
+                            request_params['reasoning_effort'] = self.reasoning_config.get('effort', 'high')
+                        else:
+                            extra_body['thinking'] = {'type': 'disabled'}
+                    # custom endpoint: no reasoning, no provider routing
+
+                    # Configure response_format based on json_output_mode
+                    if self.json_output_mode == 'json_object':
+                        request_params['response_format'] = {'type': 'json_object'}
+                    elif self.json_output_mode == 'json_schema':
+                        if endpoint_type == 'openrouter':
+                            request_params['response_format'] = {
+                                'type': 'json_schema',
+                                'json_schema': self._build_json_schema(has_toc=has_toc),
+                            }
+                        else:
+                            # Strict json_schema is OpenRouter-only; degrade gracefully
+                            request_params['response_format'] = {'type': 'json_object'}
+
                     if extra_body:
                         request_params['extra_body'] = extra_body
 
@@ -973,7 +1119,7 @@ class TranslationWorker(QObject):
 
                     # Add extra headers for OpenRouter
                     extra_headers = {}
-                    if 'openrouter.ai' in self.endpoint_config['base_url']:
+                    if endpoint_type == 'openrouter':
                         extra_headers = {
                             "HTTP-Referer": "https://github.com/BeetleBonsai798/EpubTranslate",
                             "X-Title": "EpubTranslate"
@@ -987,7 +1133,10 @@ class TranslationWorker(QObject):
 
                     # Collect response from this provider/endpoint
                     current_response = ""
+                    reasoning_text = ""
                     chunk_count = 0
+                    reasoning_started = False
+                    content_started = False
 
                     try:
                         for chunk_data in stream:
@@ -1004,13 +1153,35 @@ class TranslationWorker(QObject):
 
                                     choice = chunk_data.choices[0]
 
-                                    if (hasattr(choice, 'delta') and
-                                            choice.delta is not None and
-                                            hasattr(choice.delta, 'content') and
-                                            choice.delta.content is not None):
-                                        content = choice.delta.content
-                                        current_response += content
-                                        self.update_progress.emit(content, self.worker_id, "blue")
+                                    if hasattr(choice, 'delta') and choice.delta is not None:
+                                        # Reasoning chunk (DeepSeek: reasoning_content; OpenRouter: reasoning)
+                                        reasoning_chunk = (
+                                            getattr(choice.delta, 'reasoning_content', None)
+                                            or getattr(choice.delta, 'reasoning', None)
+                                        )
+                                        if reasoning_chunk:
+                                            if not reasoning_started:
+                                                self.update_progress.emit(
+                                                    "\n💭 [REASONING]\n",
+                                                    self.worker_id, "gray"
+                                                )
+                                                reasoning_started = True
+                                            reasoning_text += reasoning_chunk
+                                            self.update_progress.emit(
+                                                reasoning_chunk, self.worker_id, "gray"
+                                            )
+
+                                        # Content chunk (the actual translation JSON)
+                                        content = getattr(choice.delta, 'content', None)
+                                        if content:
+                                            if reasoning_started and not content_started:
+                                                self.update_progress.emit(
+                                                    "\n📝 [RESPONSE]\n",
+                                                    self.worker_id, "blue"
+                                                )
+                                                content_started = True
+                                            current_response += content
+                                            self.update_progress.emit(content, self.worker_id, "blue")
                                 else:
                                     continue
 
@@ -1041,24 +1212,30 @@ class TranslationWorker(QObject):
                             )
                         else:
                             self.update_progress.emit(
-                                f"\n✅ Successfully got response from custom endpoint\n",
+                                f"\n✅ Successfully got response from {endpoint_label}\n",
                                 self.worker_id, "green"
                             )
 
-                        # Emit the raw JSON response
-                        self.raw_json_updated.emit(current_response)
+                        # Emit the raw JSON response, prepending reasoning when captured
+                        if reasoning_text:
+                            combined_raw = (
+                                "--- REASONING ---\n"
+                                f"{reasoning_text}\n\n"
+                                "--- RESPONSE ---\n"
+                                f"{current_response}"
+                            )
+                        else:
+                            combined_raw = current_response
+                        self.raw_json_updated.emit(combined_raw)
 
                         # Update all lists based on enabled modes
                         if self.context_mode:
-                            context_updated = False
                             if 'characters' in json_data:
                                 self.context_manager.update_characters(json_data['characters'])
                                 self.characters_updated.emit()
-                                context_updated = True
                             if 'places' in json_data:
                                 self.context_manager.update_places(json_data['places'])
                                 self.places_updated.emit()
-                                context_updated = True
                             if 'terms' in json_data:
                                 self.context_manager.update_terms(json_data['terms'])
                                 self.terms_updated.emit()
@@ -1078,10 +1255,8 @@ class TranslationWorker(QObject):
                     # If we didn't get valid JSON, retry or move to next provider
                     if retry_attempt < self.retries_per_provider - 1:
                         # Still have retries left for this provider
-                        if current_provider:
-                            retry_notice = f"\n⚠️ Invalid JSON response from {current_provider}, retrying same provider...\n"
-                        else:
-                            retry_notice = f"\n⚠️ Invalid JSON response from custom endpoint, retrying...\n"
+                        source = current_provider if current_provider else endpoint_label
+                        retry_notice = f"\n⚠️ Invalid JSON response from {source}, retrying...\n"
                         self.update_progress.emit(retry_notice, self.worker_id, "orange")
                     else:
                         # No more retries for this provider, will move to next
@@ -1090,7 +1265,7 @@ class TranslationWorker(QObject):
                             self.update_progress.emit(retry_notice, self.worker_id, "orange")
 
                 except Exception as e:
-                    error_source = current_provider if current_provider else "custom endpoint"
+                    error_source = current_provider if current_provider else endpoint_label
                     self.update_progress.emit(
                         f"\n❌ Error with {error_source}: {str(e)}\n",
                         self.worker_id, "red"
@@ -1103,17 +1278,18 @@ class TranslationWorker(QObject):
                         self.update_progress.emit(f"🔄 Moving to next provider...\n", self.worker_id, "orange")
 
         # All attempts failed
-        if self.endpoint_config['use_custom']:
-            self.update_progress.emit(
-                f"\n\n💥 ERROR: Failed to get valid translation from custom endpoint after {self.retries_per_provider} attempts.\n",
-                self.worker_id, "red"
-            )
-        else:
+        if endpoint_type == 'openrouter':
             total_attempts = len(self.providers) * self.retries_per_provider
             self.update_progress.emit(
                 f"\n\n💥 ERROR: Failed to get valid translation after {total_attempts} total attempts "
                 f"({self.retries_per_provider} retries per provider).\n"
                 f"Providers tried: {', '.join(self.providers)}\n",
+                self.worker_id, "red"
+            )
+        else:
+            self.update_progress.emit(
+                f"\n\n💥 ERROR: Failed to get valid translation from {endpoint_label} "
+                f"after {self.retries_per_provider} attempts.\n",
                 self.worker_id, "red"
             )
         return None

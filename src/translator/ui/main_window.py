@@ -17,7 +17,13 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLine
 from PySide6.QtGui import QFont, QAction, QTextCursor
 from ebooklib import epub
 
-from ..config import ConfigManager, OPENROUTER_BASE_URL, DEFAULT_PROVIDERS
+from ..config import (
+    ConfigManager,
+    OPENROUTER_BASE_URL,
+    DEFAULT_PROVIDERS,
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_DEFAULT_MODELS,
+)
 from ..api import OpenRouterFetcher
 from ..core import TranslationWorker
 from .chapter_overview_widget import ChapterOverviewWidget
@@ -201,13 +207,17 @@ class EpubTranslatorApp(QMainWindow):
         api_group = QGroupBox("API Configuration")
         api_layout = QVBoxLayout()
 
-        # OpenRouter/Custom toggle
+        # OpenRouter / DeepSeek / Custom toggle
         endpoint_toggle_layout = QHBoxLayout()
         self.openrouter_radio = QRadioButton("OpenRouter")
+        self.deepseek_radio = QRadioButton("DeepSeek")
         self.custom_endpoint_radio = QRadioButton("Custom Endpoint")
         self.openrouter_radio.setChecked(True)
         self.openrouter_radio.toggled.connect(self.on_endpoint_type_changed)
+        self.deepseek_radio.toggled.connect(self.on_endpoint_type_changed)
+        self.custom_endpoint_radio.toggled.connect(self.on_endpoint_type_changed)
         endpoint_toggle_layout.addWidget(self.openrouter_radio)
+        endpoint_toggle_layout.addWidget(self.deepseek_radio)
         endpoint_toggle_layout.addWidget(self.custom_endpoint_radio)
         endpoint_toggle_layout.addStretch()
         api_layout.addLayout(endpoint_toggle_layout)
@@ -232,6 +242,44 @@ class EpubTranslatorApp(QMainWindow):
         openrouter_layout.addLayout(api_key_layout)
         self.openrouter_container.setLayout(openrouter_layout)
         api_layout.addWidget(self.openrouter_container)
+
+        # DeepSeek Endpoint Configuration
+        self.deepseek_container = QWidget()
+        deepseek_layout = QVBoxLayout()
+        deepseek_layout.setContentsMargins(0, 0, 0, 0)
+
+        ds_url_layout = QHBoxLayout()
+        ds_url_layout.addWidget(QLabel("DeepSeek URL:"))
+        self.deepseek_endpoint_url = QLineEdit()
+        self.deepseek_endpoint_url.setPlaceholderText(DEEPSEEK_BASE_URL)
+        ds_url_layout.addWidget(self.deepseek_endpoint_url)
+        deepseek_layout.addLayout(ds_url_layout)
+
+        ds_key_layout = QHBoxLayout()
+        ds_key_layout.addWidget(QLabel("DeepSeek API Key:"))
+        self.deepseek_api_key_entry = QLineEdit()
+        self.deepseek_api_key_entry.setEchoMode(QLineEdit.Password)
+        self.deepseek_api_key_entry.setPlaceholderText("Enter your DeepSeek API key...")
+        ds_key_layout.addWidget(self.deepseek_api_key_entry)
+
+        self.show_deepseek_key_btn = QPushButton("👁")
+        self.show_deepseek_key_btn.setMaximumWidth(30)
+        self.show_deepseek_key_btn.clicked.connect(self.toggle_deepseek_key_visibility)
+        ds_key_layout.addWidget(self.show_deepseek_key_btn)
+        deepseek_layout.addLayout(ds_key_layout)
+
+        ds_model_layout = QHBoxLayout()
+        ds_model_layout.addWidget(QLabel("Model:"))
+        self.deepseek_model_combo = QComboBox()
+        self.deepseek_model_combo.setEditable(True)
+        for model_name in DEEPSEEK_DEFAULT_MODELS:
+            self.deepseek_model_combo.addItem(model_name)
+        ds_model_layout.addWidget(self.deepseek_model_combo)
+        deepseek_layout.addLayout(ds_model_layout)
+
+        self.deepseek_container.setLayout(deepseek_layout)
+        self.deepseek_container.setVisible(False)
+        api_layout.addWidget(self.deepseek_container)
 
         # Custom Endpoint Configuration
         self.custom_endpoint_container = QWidget()
@@ -486,6 +534,73 @@ class EpubTranslatorApp(QMainWindow):
 
         settings_layout.addLayout(params_row5)
 
+        # Parameters row 6 - JSON output mode
+        params_row6 = QHBoxLayout()
+        params_row6.addWidget(QLabel("JSON output:"))
+        self.json_output_combo = QComboBox()
+        self.json_output_combo.addItem("Off", "off")
+        self.json_output_combo.addItem("JSON Object", "json_object")
+        self.json_output_combo.addItem("JSON Schema (strict, OpenRouter only)", "json_schema")
+        self.json_output_combo.setToolTip(
+            "Off: free-text, parsed via regex (legacy default)\n"
+            "JSON Object: response_format=json_object (OpenRouter + DeepSeek)\n"
+            "JSON Schema: strict structured outputs (OpenRouter only — falls back to "
+            "JSON Object on DeepSeek/Custom)"
+        )
+        params_row6.addWidget(self.json_output_combo)
+        params_row6.addStretch()
+
+        settings_layout.addLayout(params_row6)
+
+        # Reasoning group
+        self.reasoning_group = QGroupBox("Reasoning / Thinking")
+        reasoning_layout = QVBoxLayout()
+
+        self.reasoning_enabled_check = QCheckBox("Enable reasoning")
+        self.reasoning_enabled_check.setToolTip(
+            "OpenRouter: sends reasoning.effort or reasoning.max_tokens via extra_body.\n"
+            "DeepSeek: sends thinking={type:enabled} + reasoning_effort. When unchecked, "
+            "explicitly disables DeepSeek thinking (it defaults to on for v4 models)."
+        )
+        reasoning_layout.addWidget(self.reasoning_enabled_check)
+
+        reasoning_effort_row = QHBoxLayout()
+        reasoning_effort_row.addWidget(QLabel("Effort:"))
+        self.reasoning_effort_combo = QComboBox()
+        self.reasoning_effort_combo.addItems(["minimal", "low", "medium", "high", "xhigh"])
+        self.reasoning_effort_combo.setCurrentText("medium")
+        self.reasoning_effort_combo.setMaximumWidth(120)
+        self.reasoning_effort_combo.setToolTip(
+            "OpenRouter: minimal/low/medium/high/xhigh (passed through).\n"
+            "DeepSeek: low/medium → high, xhigh → max (mapped server-side)."
+        )
+        reasoning_effort_row.addWidget(self.reasoning_effort_combo)
+
+        reasoning_effort_row.addWidget(QLabel("Max tokens:"))
+        self.reasoning_max_tokens_spin = QSpinBox()
+        self.reasoning_max_tokens_spin.setRange(0, 128000)
+        self.reasoning_max_tokens_spin.setSingleStep(500)
+        self.reasoning_max_tokens_spin.setMaximumWidth(100)
+        self.reasoning_max_tokens_spin.setToolTip(
+            "0 = use effort. Non-zero overrides effort and is sent as reasoning.max_tokens "
+            "(Anthropic/Gemini-style, OpenRouter only). Ignored by DeepSeek."
+        )
+        reasoning_effort_row.addWidget(self.reasoning_max_tokens_spin)
+        reasoning_effort_row.addStretch()
+        reasoning_layout.addLayout(reasoning_effort_row)
+
+        self.reasoning_exclude_check = QCheckBox(
+            "Exclude reasoning from response (run internally only, OpenRouter)"
+        )
+        self.reasoning_exclude_check.setToolTip(
+            "OpenRouter only: model still uses reasoning internally but doesn't return it. "
+            "DeepSeek doesn't support this — reasoning_content is just hidden from the UI."
+        )
+        reasoning_layout.addWidget(self.reasoning_exclude_check)
+
+        self.reasoning_group.setLayout(reasoning_layout)
+        settings_layout.addWidget(self.reasoning_group)
+
         # Context options
         self.context_mode_check = QCheckBox("Context Mode (Characters, Places, Terms)")
         self.notes_mode_check = QCheckBox("Translation Notes Mode")
@@ -653,8 +768,10 @@ class EpubTranslatorApp(QMainWindow):
     def load_config_to_ui(self):
         """Load configuration values to UI components."""
         # Endpoint type
-        use_custom = self.config.get('use_custom_endpoint', False)
-        if use_custom:
+        endpoint_type = self.config.get('endpoint_type', 'openrouter')
+        if endpoint_type == 'deepseek':
+            self.deepseek_radio.setChecked(True)
+        elif endpoint_type == 'custom':
             self.custom_endpoint_radio.setChecked(True)
         else:
             self.openrouter_radio.setChecked(True)
@@ -664,6 +781,13 @@ class EpubTranslatorApp(QMainWindow):
         self.custom_endpoint_url.setText(self.config.get('custom_endpoint_url', ''))
         self.custom_endpoint_key.setText(self.config.get('custom_endpoint_key', ''))
         self.custom_endpoint_model.setText(self.config.get('custom_endpoint_model', ''))
+        self.deepseek_endpoint_url.setText(
+            self.config.get('deepseek_endpoint_url', DEEPSEEK_BASE_URL)
+        )
+        self.deepseek_api_key_entry.setText(self.config.get('deepseek_api_key', ''))
+        self.deepseek_model_combo.setCurrentText(
+            self.config.get('deepseek_model', 'deepseek-v4-pro')
+        )
 
         # Model
         self.model_combo.setCurrentText(self.config.get('model', ''))
@@ -723,6 +847,21 @@ class EpubTranslatorApp(QMainWindow):
         self.filter_terms_check.setChecked(self.config.get('context_filter_terms', True))
         self._update_filter_checkboxes(self.context_filter_enabled_check.isChecked())
 
+        # Reasoning + JSON output mode
+        self.reasoning_enabled_check.setChecked(self.config.get('reasoning_enabled', False))
+        effort = self.config.get('reasoning_effort', 'medium')
+        if self.reasoning_effort_combo.findText(effort) >= 0:
+            self.reasoning_effort_combo.setCurrentText(effort)
+        self.reasoning_max_tokens_spin.setValue(self.config.get('reasoning_max_tokens', 0))
+        self.reasoning_exclude_check.setChecked(self.config.get('reasoning_exclude', False))
+
+        json_mode = self.config.get('json_output_mode', 'off')
+        json_index = self.json_output_combo.findData(json_mode)
+        if json_index >= 0:
+            self.json_output_combo.setCurrentIndex(json_index)
+
+        # Sync containers and reasoning-group enable state with the active endpoint
+        self.on_endpoint_type_changed()
         self.update_controls()
 
     def get_config_from_ui(self):
@@ -730,11 +869,14 @@ class EpubTranslatorApp(QMainWindow):
         config = {}
 
         # Endpoint configuration
-        config['use_custom_endpoint'] = self.custom_endpoint_radio.isChecked()
+        config['endpoint_type'] = self._get_endpoint_type()
         config['api_key'] = self.api_key_entry.text()
         config['custom_endpoint_url'] = self.custom_endpoint_url.text()
         config['custom_endpoint_key'] = self.custom_endpoint_key.text()
         config['custom_endpoint_model'] = self.custom_endpoint_model.text()
+        config['deepseek_endpoint_url'] = self.deepseek_endpoint_url.text()
+        config['deepseek_api_key'] = self.deepseek_api_key_entry.text()
+        config['deepseek_model'] = self.deepseek_model_combo.currentText()
 
         # Model
         config['model'] = self.model_combo.currentText()
@@ -793,6 +935,13 @@ class EpubTranslatorApp(QMainWindow):
         config['context_filter_places'] = self.filter_places_check.isChecked()
         config['context_filter_terms'] = self.filter_terms_check.isChecked()
 
+        # Reasoning + JSON output mode
+        config['reasoning_enabled'] = self.reasoning_enabled_check.isChecked()
+        config['reasoning_effort'] = self.reasoning_effort_combo.currentText()
+        config['reasoning_max_tokens'] = self.reasoning_max_tokens_spin.value()
+        config['reasoning_exclude'] = self.reasoning_exclude_check.isChecked()
+        config['json_output_mode'] = self.json_output_combo.currentData() or 'off'
+
         return config
 
     def save_current_config(self):
@@ -849,6 +998,7 @@ class EpubTranslatorApp(QMainWindow):
         session_config = self.get_config_from_ui()
         session_config.pop('api_key', None)
         session_config.pop('custom_endpoint_key', None)
+        session_config.pop('deepseek_api_key', None)
 
         session_data = {
             'epub_path': epub_path,
@@ -938,17 +1088,41 @@ class EpubTranslatorApp(QMainWindow):
     # ==================== UI Interaction Methods ====================
 
     def on_endpoint_type_changed(self):
-        """Handle switching between OpenRouter and custom endpoint."""
-        is_openrouter = self.openrouter_radio.isChecked()
+        """Handle switching between OpenRouter, DeepSeek, and custom endpoint."""
+        endpoint_type = self._get_endpoint_type()
+        is_openrouter = endpoint_type == 'openrouter'
+        is_deepseek = endpoint_type == 'deepseek'
+        is_custom = endpoint_type == 'custom'
 
         self.openrouter_container.setVisible(is_openrouter)
-        self.custom_endpoint_container.setVisible(not is_openrouter)
+        self.deepseek_container.setVisible(is_deepseek)
+        self.custom_endpoint_container.setVisible(is_custom)
         self.model_selection_container.setVisible(is_openrouter)
 
-        if not is_openrouter:
+        # Reasoning controls only meaningful for OpenRouter and DeepSeek
+        self.reasoning_group.setEnabled(not is_custom)
+
+        # JSON Schema strict mode is OpenRouter-only — auto-revert if needed
+        if (not is_openrouter
+                and self.json_output_combo.currentData() == 'json_schema'):
+            object_index = self.json_output_combo.findData('json_object')
+            if object_index >= 0:
+                self.json_output_combo.setCurrentIndex(object_index)
+
+        if is_custom:
             self.api_status_label.setText("Using custom endpoint - providers not available")
+        elif is_deepseek:
+            self.api_status_label.setText("Using DeepSeek - provider routing not applicable")
         else:
             self.api_status_label.setText("")
+
+    def _get_endpoint_type(self):
+        """Return the current endpoint type as a string."""
+        if self.deepseek_radio.isChecked():
+            return 'deepseek'
+        if self.custom_endpoint_radio.isChecked():
+            return 'custom'
+        return 'openrouter'
 
     def toggle_api_key_visibility(self):
         """Toggle API key visibility."""
@@ -967,6 +1141,15 @@ class EpubTranslatorApp(QMainWindow):
         else:
             self.custom_endpoint_key.setEchoMode(QLineEdit.Password)
             self.show_custom_key_btn.setText("👁")
+
+    def toggle_deepseek_key_visibility(self):
+        """Toggle DeepSeek API key visibility."""
+        if self.deepseek_api_key_entry.echoMode() == QLineEdit.Password:
+            self.deepseek_api_key_entry.setEchoMode(QLineEdit.Normal)
+            self.show_deepseek_key_btn.setText("🙈")
+        else:
+            self.deepseek_api_key_entry.setEchoMode(QLineEdit.Password)
+            self.show_deepseek_key_btn.setText("👁")
 
     def toggle_chapter_selection(self):
         """Toggle between range and CSV chapter selection."""
@@ -1246,7 +1429,8 @@ class EpubTranslatorApp(QMainWindow):
             return
 
         # Check API key based on endpoint type
-        if self.custom_endpoint_radio.isChecked():
+        endpoint_type = self._get_endpoint_type()
+        if endpoint_type == 'custom':
             api_key = self.custom_endpoint_key.text().strip()
             if not api_key:
                 QMessageBox.warning(self, "Warning", "Please enter your custom endpoint API key!")
@@ -1264,8 +1448,27 @@ class EpubTranslatorApp(QMainWindow):
 
             selected_providers = []
             endpoint_config = {
-                'use_custom': True,
+                'endpoint_type': 'custom',
                 'base_url': custom_url,
+                'api_key': api_key
+            }
+        elif endpoint_type == 'deepseek':
+            api_key = self.deepseek_api_key_entry.text().strip()
+            if not api_key:
+                QMessageBox.warning(self, "Warning", "Please enter your DeepSeek API key!")
+                return
+
+            base_url = self.deepseek_endpoint_url.text().strip() or DEEPSEEK_BASE_URL
+
+            model_id = self.deepseek_model_combo.currentText().strip()
+            if not model_id:
+                QMessageBox.warning(self, "Warning", "Please select a DeepSeek model!")
+                return
+
+            selected_providers = []
+            endpoint_config = {
+                'endpoint_type': 'deepseek',
+                'base_url': base_url,
                 'api_key': api_key
             }
         else:
@@ -1281,7 +1484,7 @@ class EpubTranslatorApp(QMainWindow):
                 selected_providers = self.config.get('selected_providers') or list(DEFAULT_PROVIDERS)
 
             endpoint_config = {
-                'use_custom': False,
+                'endpoint_type': 'openrouter',
                 'base_url': OPENROUTER_BASE_URL,
                 'api_key': api_key
             }
@@ -1361,6 +1564,14 @@ class EpubTranslatorApp(QMainWindow):
                 'filter_terms': self.filter_terms_check.isChecked()
             }
 
+            reasoning_config = {
+                'enabled': self.reasoning_enabled_check.isChecked(),
+                'effort': self.reasoning_effort_combo.currentText(),
+                'max_tokens': self.reasoning_max_tokens_spin.value(),
+                'exclude': self.reasoning_exclude_check.isChecked(),
+            }
+            json_output_mode = self.json_output_combo.currentData() or 'off'
+
             worker = TranslationWorker(
                 output_folder=output_folder,
                 model=model_id,
@@ -1389,7 +1600,9 @@ class EpubTranslatorApp(QMainWindow):
                 embedding_config=embedding_config,
                 base_prompt_position=self.base_prompt_combo.currentData(),
                 toc_map=toc_map,
-                previous_toc_count=self.previous_toc_spin.value()
+                previous_toc_count=self.previous_toc_spin.value(),
+                reasoning_config=reasoning_config,
+                json_output_mode=json_output_mode,
             )
 
             thread = threading.Thread(target=worker.run, daemon=True)
@@ -1460,10 +1673,11 @@ class EpubTranslatorApp(QMainWindow):
             "green": Qt.GlobalColor.darkGreen,
             "blue": Qt.GlobalColor.blue,
             "black": Qt.GlobalColor.black,
-            "orange": Qt.GlobalColor.darkYellow
+            "orange": Qt.GlobalColor.darkYellow,
+            "gray": Qt.GlobalColor.gray,
         }
 
-        log_widget.setTextColor(format_table[color])
+        log_widget.setTextColor(format_table.get(color, Qt.GlobalColor.black))
         cursor.insertText(text)
         log_widget.ensureCursorVisible()
 
@@ -1678,28 +1892,35 @@ class EpubTranslatorApp(QMainWindow):
         toc_log_widget = self.create_tab_for_toc()
 
         # Get endpoint config
-        if self.custom_endpoint_radio.isChecked():
+        endpoint_type = self._get_endpoint_type()
+        if endpoint_type == 'custom':
             api_key = self.custom_endpoint_key.text().strip()
             base_url = self.custom_endpoint_url.text().strip()
             model = self.custom_endpoint_model.text().strip()
+        elif endpoint_type == 'deepseek':
+            api_key = self.deepseek_api_key_entry.text().strip()
+            base_url = self.deepseek_endpoint_url.text().strip() or DEEPSEEK_BASE_URL
+            model = self.deepseek_model_combo.currentText().strip()
         else:
             api_key = self.api_key_entry.text().strip()
             base_url = OPENROUTER_BASE_URL
             model = self.model_combo.currentText().strip()
 
         endpoint_config = {
+            'endpoint_type': endpoint_type,
             'api_key': api_key,
             'base_url': base_url,
-            'model': model
+            'model': model,
         }
 
-        # Get selected providers
+        # Get selected providers (only meaningful for OpenRouter)
         selected_providers = []
-        for i in range(self.selected_providers_list.count()):
-            selected_providers.append(self.selected_providers_list.item(i).text())
+        if endpoint_type == 'openrouter':
+            for i in range(self.selected_providers_list.count()):
+                selected_providers.append(self.selected_providers_list.item(i).text())
 
-        if not selected_providers:
-            selected_providers = list(DEFAULT_PROVIDERS)
+            if not selected_providers:
+                selected_providers = list(DEFAULT_PROVIDERS)
 
         # Create context manager to load existing context
         context_manager = ContextManager(
@@ -1717,6 +1938,14 @@ class EpubTranslatorApp(QMainWindow):
             'filter_terms': self.filter_terms_check.isChecked(),
         }
 
+        reasoning_config = {
+            'enabled': self.reasoning_enabled_check.isChecked(),
+            'effort': self.reasoning_effort_combo.currentText(),
+            'max_tokens': self.reasoning_max_tokens_spin.value(),
+            'exclude': self.reasoning_exclude_check.isChecked(),
+        }
+        json_output_mode = self.json_output_combo.currentData() or 'off'
+
         self.toc_worker = TocTranslationWorker(
             original_book=rebuilder.original_book,
             translated_xhtml_map=translated_map,
@@ -1731,7 +1960,9 @@ class EpubTranslatorApp(QMainWindow):
             top_k=self.top_k_spin.value(),
             timeout=self.timeout_spin.value(),
             retries_per_provider=self.retries_per_provider_spin.value(),
-            embedding_config=embedding_config
+            embedding_config=embedding_config,
+            reasoning_config=reasoning_config,
+            json_output_mode=json_output_mode,
         )
 
         # Create thread
@@ -1786,7 +2017,8 @@ class EpubTranslatorApp(QMainWindow):
             "orange": Qt.GlobalColor.darkYellow,
             "yellow": Qt.GlobalColor.darkYellow,
             "cyan": Qt.GlobalColor.cyan,
-            "white": Qt.GlobalColor.black
+            "white": Qt.GlobalColor.black,
+            "gray": Qt.GlobalColor.gray,
         }
 
         log_widget.setTextColor(format_table.get(color, Qt.GlobalColor.black))

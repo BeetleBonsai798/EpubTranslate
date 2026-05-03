@@ -1,6 +1,7 @@
 {
-  "use_custom_endpoint": false,
+  "endpoint_type": "openrouter",
   "custom_endpoint_model": "deepseek-ai/DeepSeek-V3.2-Exp",
+  "deepseek_model": "deepseek-v4-pro",
   "model": "deepseek/deepseek-v3.2-exp",
   "chunk_tokens": 7000,
   "temperature": 0.9,
@@ -29,6 +30,11 @@
   "end_chapter": "1",
   "csv_chapters": "",
   "last_epub_path": "",
+  "reasoning_enabled": false,
+  "reasoning_effort": "medium",
+  "reasoning_max_tokens": 0,
+  "reasoning_exclude": false,
+  "json_output_mode": "off",
   "window_geometry": {
     "x": 100,
     "y": 100,
