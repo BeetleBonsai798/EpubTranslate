@@ -23,7 +23,7 @@ from .prompts import (
     NOTES_REMINDER,
     BASE_INSTRUCTION,
     ENDING_INSTRUCTION,
-    COMPLETE_TRANSLATION_INSTRUCTION,
+    TRANSLATION_INSTRUCTION,
     TOC_INSTRUCTION
 )
 from ..utils.token_counter import num_tokens_from_string, split_chapter
@@ -672,7 +672,7 @@ class TranslationWorker(QObject):
                 base_messages.append({
                     "role": "assistant",
                     "content": json.dumps({
-                        "complete_translation": prev_chapter['translated']
+                        "translation": prev_chapter['translated']
                     }, ensure_ascii=False)
                 })
 
@@ -689,7 +689,7 @@ class TranslationWorker(QObject):
                 base_messages.append({
                     "role": "assistant",
                     "content": json.dumps({
-                        "complete_translation": prev_trans
+                        "translation": prev_trans
                     }, ensure_ascii=False)
                 })
 
@@ -806,8 +806,8 @@ class TranslationWorker(QObject):
                 }
             ]
 
-        # Always include complete_translation
-        json_schema["complete_translation"] = "the_translated_text_here"
+        # Always include translation
+        json_schema["translation"] = "the_translated_text_here"
 
         # Include toc_entries in schema if TOC entries are provided for this chunk
         has_toc = toc_entries is not None and len(toc_entries) > 0
@@ -848,9 +848,9 @@ class TranslationWorker(QObject):
             context_notes_instruction_parts.append(notes_detailed_instruction)
             instruction_number += 1
 
-        complete_translation_instr = COMPLETE_TRANSLATION_INSTRUCTION.format(number=instruction_number)
-        instruction_parts.append(complete_translation_instr)
-        context_notes_instruction_parts.append(complete_translation_instr)
+        translation_instr = TRANSLATION_INSTRUCTION.format(number=instruction_number)
+        instruction_parts.append(translation_instr)
+        context_notes_instruction_parts.append(translation_instr)
         instruction_number += 1
 
         # TOC instruction - only when TOC entries are provided
@@ -979,8 +979,8 @@ class TranslationWorker(QObject):
             }
             required.append("notes")
 
-        properties["complete_translation"] = {"type": "string"}
-        required.append("complete_translation")
+        properties["translation"] = {"type": "string"}
+        required.append("translation")
 
         if has_toc:
             properties["toc_entries"] = {
@@ -1204,7 +1204,7 @@ class TranslationWorker(QObject):
                     # Try to parse the complete response
                     json_data = self.extract_json_from_response(current_response)
 
-                    if json_data and 'complete_translation' in json_data:
+                    if json_data and 'translation' in json_data:
                         if current_provider:
                             self.update_progress.emit(
                                 f"\n✅ Successfully got response from provider: {current_provider}\n",
@@ -1250,7 +1250,7 @@ class TranslationWorker(QObject):
                         # Store any TOC entries from the response for caller to pick up
                         self._last_toc_response = json_data.get('toc_entries', None)
 
-                        return json_data['complete_translation']
+                        return json_data['translation']
 
                     # If we didn't get valid JSON, retry or move to next provider
                     if retry_attempt < self.retries_per_provider - 1:

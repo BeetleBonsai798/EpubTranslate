@@ -27,7 +27,7 @@ Entry point: `python main.py` (also installable as `epub-translate` console scri
 **Translation pipeline per chapter**:
 1. SVG preprocessing (BeautifulSoup) → HTML to Markdown (pypandoc) → token-based chunking (tiktoken, `cl100k_base`)
 2. Each chunk: build LLM message list (system prompt + context + previous chapters + text) → call OpenAI-compatible API with provider retry logic → parse JSON response
-3. Extract `complete_translation`, `characters`, `places`, `terms`, `notes`, `toc_entries` from response → update `ContextManager` (persisted to disk as JSON)
+3. Extract `translation`, `characters`, `places`, `terms`, `notes`, `toc_entries` from response → update `ContextManager` (persisted to disk as JSON)
 4. Reassemble chunks → Markdown to XHTML (pypandoc) → write to `{output}/xhtml/{n}.xhtml`
 
 **Final build**: `EpubRebuilder` loads the original EPUB, injects translated XHTMLs, and `TocTranslationWorker` translates the table of contents in batches.
