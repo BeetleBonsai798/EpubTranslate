@@ -4,10 +4,9 @@ import json
 import logging
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, List, Optional, Callable, Any, TYPE_CHECKING
+from typing import Dict, List, Optional, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .context_embedding_manager import ContextEmbeddingManager
     from .context_filter import ContextFilter
 
 logger = logging.getLogger(__name__)
@@ -66,9 +65,6 @@ class ContextManager:
         self.terms: OrderedDict[str, Dict[str, str]] = self.load_terms()
         self.notes: OrderedDict[str, str] = self.load_notes()
 
-        self._embedding_manager: Optional['ContextEmbeddingManager'] = None
-        self._use_rag: bool = False
-
         self._context_filter: Optional['ContextFilter'] = None
         self._use_context_filter: bool = False
         self._filter_characters: bool = False
@@ -88,14 +84,7 @@ class ContextManager:
             with open(self.character_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
-            char_dict = OrderedDict()
-            for orig, char_data in data.items():
-                if isinstance(char_data, dict):
-                    char_dict[orig] = char_data
-                else:
-                    # Legacy format support
-                    char_dict[orig] = {'translated': char_data, 'gender': 'not_clear'}
-
+            char_dict = OrderedDict(data)
             logger.info(f"Loaded {len(char_dict)} characters from {self.character_file}")
             return char_dict
 
@@ -142,14 +131,7 @@ class ContextManager:
             with open(self.terms_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
-            terms_dict = OrderedDict()
-            for orig, term_data in data.items():
-                if isinstance(term_data, dict):
-                    terms_dict[orig] = term_data
-                else:
-                    # Legacy format support
-                    terms_dict[orig] = {'translated': term_data, 'category': 'other'}
-
+            terms_dict = OrderedDict(data)
             logger.info(f"Loaded {len(terms_dict)} terms from {self.terms_file}")
             return terms_dict
 
@@ -438,16 +420,10 @@ class ContextManager:
         if not self.context_mode or not self.characters:
             return ""
 
-        char_list = []
-        for orig, char_data in self.characters.items():
-            if isinstance(char_data, dict):
-                trans = char_data['translated']
-                gender = char_data['gender']
-                char_list.append(f"{orig} : {trans} : {gender}")
-            else:
-                # Legacy format support
-                char_list.append(f"{orig} : {char_data} : not_clear")
-
+        char_list = [
+            f"{orig} : {data['translated']} : {data['gender']}"
+            for orig, data in self.characters.items()
+        ]
         char_string = "\n".join(char_list)
         return f"Existing Character Translations:\n{char_string}\n\n"
 
@@ -472,16 +448,10 @@ class ContextManager:
         if not self.context_mode or not self.terms:
             return ""
 
-        terms_list = []
-        for orig, term_data in self.terms.items():
-            if isinstance(term_data, dict):
-                trans = term_data['translated']
-                category = term_data['category']
-                terms_list.append(f"{orig} : {trans} : {category}")
-            else:
-                # Legacy format support
-                terms_list.append(f"{orig} : {term_data} : other")
-
+        terms_list = [
+            f"{orig} : {data['translated']} : {data['category']}"
+            for orig, data in self.terms.items()
+        ]
         terms_string = "\n".join(terms_list)
         return f"Existing Specialized Term Translations:\n{terms_string}\n\n"
 
@@ -496,104 +466,6 @@ class ContextManager:
 
         notes_list = "\n".join([f"{key} = {note}" for key, note in self.notes.items()])
         return f"Important Translation Notes:\n{notes_list}\n\n"
-
-    def set_embedding_manager(
-        self,
-        embedding_manager: 'ContextEmbeddingManager',
-        use_rag: bool = True
-    ) -> None:
-        self._embedding_manager = embedding_manager
-        self._use_rag = use_rag
-
-    def enable_rag(self, enabled: bool = True) -> None:
-        self._use_rag = enabled and self._embedding_manager is not None
-
-    @property
-    def rag_enabled(self) -> bool:
-        return self._use_rag and self._embedding_manager is not None
-
-    def update_embeddings(self, force_rebuild: bool = False) -> tuple:
-        if not self._embedding_manager:
-            return (0, 0, 0)
-
-        return self._embedding_manager.update_all_embeddings(
-            self.characters,
-            self.places,
-            self.terms,
-            force_rebuild=force_rebuild
-        )
-
-    def get_relevant_character_prompt(self, chunk_text: str) -> str:
-        if not self.context_mode:
-            return ""
-
-        if not self._use_rag or not self._embedding_manager:
-            return self.get_character_prompt()
-
-        relevant_chars = self._embedding_manager.find_relevant_characters(
-            chunk_text,
-            self.characters
-        )
-
-        if not relevant_chars:
-            return ""
-
-        char_list = []
-        for orig, char_data in relevant_chars.items():
-            if isinstance(char_data, dict):
-                trans = char_data['translated']
-                gender = char_data['gender']
-                char_list.append(f"{orig} : {trans} : {gender}")
-            else:
-                char_list.append(f"{orig} : {char_data} : not_clear")
-
-        char_string = "\n".join(char_list)
-        return f"Existing Character Translations:\n{char_string}\n\n"
-
-    def get_relevant_place_prompt(self, chunk_text: str) -> str:
-        if not self.context_mode:
-            return ""
-
-        if not self._use_rag or not self._embedding_manager:
-            return self.get_place_prompt()
-
-        relevant_places = self._embedding_manager.find_relevant_places(
-            chunk_text,
-            self.places
-        )
-
-        if not relevant_places:
-            return ""
-
-        place_list = "\n".join([f"{orig} : {trans}" for orig, trans in relevant_places.items()])
-        return f"Existing Place Translations:\n{place_list}\n\n"
-
-    def get_relevant_terms_prompt(self, chunk_text: str) -> str:
-        if not self.context_mode:
-            return ""
-
-        if not self._use_rag or not self._embedding_manager:
-            return self.get_terms_prompt()
-
-        relevant_terms = self._embedding_manager.find_relevant_terms(
-            chunk_text,
-            self.terms
-        )
-
-        if not relevant_terms:
-            return ""
-
-        terms_list = []
-        for orig, term_data in relevant_terms.items():
-            if isinstance(term_data, dict):
-                trans = term_data['translated']
-                category = term_data['category']
-                terms_list.append(f"{orig} : {trans} : {category}")
-            else:
-                terms_list.append(f"{orig} : {term_data} : other")
-
-        terms_string = "\n".join(terms_list)
-        return f"Existing Specialized Term Translations:\n{terms_string}\n\n"
 
     def set_context_filter(
         self,
@@ -655,14 +527,10 @@ class ContextManager:
 
         char_prompt = ""
         if relevant_chars:
-            char_list = []
-            for orig, char_data in relevant_chars.items():
-                if isinstance(char_data, dict):
-                    trans = char_data['translated']
-                    gender = char_data['gender']
-                    char_list.append(f"{orig} : {trans} : {gender}")
-                else:
-                    char_list.append(f"{orig} : {char_data} : not_clear")
+            char_list = [
+                f"{orig} : {data['translated']} : {data['gender']}"
+                for orig, data in relevant_chars.items()
+            ]
             char_prompt = f"Existing Character Translations:\n" + "\n".join(char_list) + "\n\n"
 
         place_prompt = ""
@@ -672,14 +540,10 @@ class ContextManager:
 
         terms_prompt = ""
         if relevant_terms:
-            terms_list = []
-            for orig, term_data in relevant_terms.items():
-                if isinstance(term_data, dict):
-                    trans = term_data['translated']
-                    category = term_data['category']
-                    terms_list.append(f"{orig} : {trans} : {category}")
-                else:
-                    terms_list.append(f"{orig} : {term_data} : other")
+            terms_list = [
+                f"{orig} : {data['translated']} : {data['category']}"
+                for orig, data in relevant_terms.items()
+            ]
             terms_prompt = f"Existing Specialized Term Translations:\n" + "\n".join(terms_list) + "\n\n"
 
         return (char_prompt, place_prompt, terms_prompt, match_details)

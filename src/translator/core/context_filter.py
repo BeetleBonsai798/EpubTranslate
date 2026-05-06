@@ -116,15 +116,13 @@ class ContextFilter:
         for orig, char_data in characters.items():
             match = self._find_match_in_chunk(orig, chunk, chunk_normalized, allow_loose_partial=True)
 
-            if match is None and isinstance(char_data, dict):
-                translated = char_data.get('translated', '')
-                if translated:
-                    match = self._find_match_in_chunk(translated, chunk, chunk_normalized, allow_loose_partial=True)
+            translated = char_data.get('translated', '')
+            if match is None and translated:
+                match = self._find_match_in_chunk(translated, chunk, chunk_normalized, allow_loose_partial=True)
 
             if match:
                 relevant[orig] = char_data
                 matched_text, match_type = match
-                translated = char_data.get('translated', '') if isinstance(char_data, dict) else str(char_data)
                 match_details.append((orig, translated, matched_text, match_type))
 
         logger.debug(f"Character filter: {len(relevant)}/{len(characters)} matched")
@@ -171,15 +169,13 @@ class ContextFilter:
         for orig, term_data in terms.items():
             match = self._find_match_in_chunk(orig, chunk, chunk_normalized, prefix_only=True)
 
-            if match is None and isinstance(term_data, dict):
-                translated = term_data.get('translated', '')
-                if translated:
-                    match = self._find_match_in_chunk(translated, chunk, chunk_normalized, prefix_only=True)
+            translated = term_data.get('translated', '')
+            if match is None and translated:
+                match = self._find_match_in_chunk(translated, chunk, chunk_normalized, prefix_only=True)
 
             if match:
                 relevant[orig] = term_data
                 matched_text, match_type = match
-                translated = term_data.get('translated', '') if isinstance(term_data, dict) else str(term_data)
                 match_details.append((orig, translated, matched_text, match_type))
 
         logger.debug(f"Term filter: {len(relevant)}/{len(terms)} matched")
