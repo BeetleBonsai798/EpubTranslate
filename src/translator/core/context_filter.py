@@ -116,14 +116,10 @@ class ContextFilter:
         for orig, char_data in characters.items():
             match = self._find_match_in_chunk(orig, chunk, chunk_normalized, allow_loose_partial=True)
 
-            translated = char_data.get('translated', '')
-            if match is None and translated:
-                match = self._find_match_in_chunk(translated, chunk, chunk_normalized, allow_loose_partial=True)
-
             if match:
                 relevant[orig] = char_data
                 matched_text, match_type = match
-                match_details.append((orig, translated, matched_text, match_type))
+                match_details.append((orig, char_data.get('translated', ''), matched_text, match_type))
 
         logger.debug(f"Character filter: {len(relevant)}/{len(characters)} matched")
         return relevant, match_details
@@ -142,9 +138,6 @@ class ContextFilter:
 
         for orig, trans in places.items():
             match = self._find_match_in_chunk(orig, chunk, chunk_normalized)
-
-            if match is None and trans:
-                match = self._find_match_in_chunk(trans, chunk, chunk_normalized)
 
             if match:
                 relevant[orig] = trans
@@ -169,14 +162,10 @@ class ContextFilter:
         for orig, term_data in terms.items():
             match = self._find_match_in_chunk(orig, chunk, chunk_normalized, prefix_only=True)
 
-            translated = term_data.get('translated', '')
-            if match is None and translated:
-                match = self._find_match_in_chunk(translated, chunk, chunk_normalized, prefix_only=True)
-
             if match:
                 relevant[orig] = term_data
                 matched_text, match_type = match
-                match_details.append((orig, translated, matched_text, match_type))
+                match_details.append((orig, term_data.get('translated', ''), matched_text, match_type))
 
         logger.debug(f"Term filter: {len(relevant)}/{len(terms)} matched")
         return relevant, match_details
