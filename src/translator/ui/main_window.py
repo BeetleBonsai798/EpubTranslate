@@ -474,8 +474,8 @@ class EpubTranslatorApp(QMainWindow):
 
         params_row2.addWidget(QLabel("Max Tokens:"))
         self.max_tokens_spin = QSpinBox()
-        self.max_tokens_spin.setRange(100, 16000)
-        self.max_tokens_spin.setMaximumWidth(80)
+        self.max_tokens_spin.setRange(100, 1000000)
+        self.max_tokens_spin.setMaximumWidth(110)
         params_row2.addWidget(self.max_tokens_spin)
         params_row2.addStretch()
 
