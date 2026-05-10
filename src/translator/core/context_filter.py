@@ -5,6 +5,8 @@ import math
 from collections import OrderedDict
 from typing import Dict, List, Tuple, Optional
 
+from .context_manager import format_character_name
+
 logger = logging.getLogger(__name__)
 
 
@@ -119,7 +121,7 @@ class ContextFilter:
             if match:
                 relevant[orig] = char_data
                 matched_text, match_type = match
-                match_details.append((orig, char_data.get('translated', ''), matched_text, match_type))
+                match_details.append((orig, format_character_name(char_data), matched_text, match_type))
 
         logger.debug(f"Character filter: {len(relevant)}/{len(characters)} matched")
         return relevant, match_details

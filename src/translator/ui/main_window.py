@@ -2089,18 +2089,21 @@ class EpubTranslatorApp(QMainWindow):
         if os.path.exists(self.current_character_file):
             try:
                 import json
+                from ..core.context_manager import format_character_name
                 with open(self.current_character_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 lines = []
                 for orig, char_data in data.items():
-                    if isinstance(char_data, dict):
-                        trans = char_data['translated']
-                        gender = char_data['gender']
-                        lines.append(f"{orig} : {trans} : {gender}")
+                    if isinstance(char_data, dict) and 'first_name' in char_data:
+                        name_str = format_character_name(char_data)
+                        gender = char_data.get('gender', 'not_clear')
+                        lines.append(f"{orig} : {name_str} : {gender}")
                     else:
-                        lines.append(f"{orig} : {char_data} : not_clear")
+                        lines.append(f"{orig} : (invalid entry) : not_clear")
                 self.character_tab.setPlainText("\n".join(lines))
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 self.character_tab.setPlainText(f"Error loading character file: {str(e)}")
         else:
             self.character_tab.setPlainText("No character data available yet.")

@@ -606,6 +606,12 @@ class TranslationWorker(QObject):
             {"role": "system", "content": SYSTEM_PROMPT},
         ]
 
+        # Collect compact context blocks (chars/places/terms/notes/TOC) so they
+        # can be bundled into the same user message as <source_text>, above it.
+        # Only the previous-chapter and previous-chunk turn pairs remain as
+        # standalone messages — they need user/assistant role structure.
+        bundled_context_parts: list[str] = []
+
         # Add context prompts based on enabled modes (with filtering if available)
         if self.context_mode:
             if self.context_manager.context_filter_enabled:
@@ -649,16 +655,16 @@ class TranslationWorker(QObject):
                 terms_prompt = self.context_manager.get_terms_prompt()
 
             if char_prompt:
-                base_messages.append({"role": "user", "content": char_prompt})
+                bundled_context_parts.append(char_prompt.rstrip())
             if place_prompt:
-                base_messages.append({"role": "user", "content": place_prompt})
+                bundled_context_parts.append(place_prompt.rstrip())
             if terms_prompt:
-                base_messages.append({"role": "user", "content": terms_prompt})
+                bundled_context_parts.append(terms_prompt.rstrip())
 
         if self.notes_mode:
             notes_prompt = self.context_manager.get_notes_prompt()
             if notes_prompt:
-                base_messages.append({"role": "user", "content": notes_prompt})
+                bundled_context_parts.append(notes_prompt.rstrip())
 
         # Add previous chapters context
         if self.send_previous and self.previous_chapter_pairs:
@@ -698,23 +704,22 @@ class TranslationWorker(QObject):
         if chunk_index == 1 and chapter_number and chapter_number in self.toc_map:
             toc_entries = self.toc_map[chapter_number]
 
-        # Inject TOC context into messages if we have entries
+        # Bundle TOC context into the chunk message (above source_text) instead of a separate user turn
         if toc_entries:
-            # Add previous TOC translations for naming consistency
             prev_toc = self._get_previous_toc_entries(chapter_number)
-            toc_message_parts = []
+            toc_block_parts = []
             if prev_toc:
-                toc_message_parts.append("<previous_toc_translations purpose=\"naming_consistency\">")
+                toc_block_parts.append("<previous_toc_translations purpose=\"naming_consistency\">")
                 for entry in prev_toc:
-                    toc_message_parts.append(f"- {entry['original']} → {entry['translated']}")
-                toc_message_parts.append("</previous_toc_translations>")
-                toc_message_parts.append("")
+                    toc_block_parts.append(f"- {entry['original']} → {entry['translated']}")
+                toc_block_parts.append("</previous_toc_translations>")
+                toc_block_parts.append("")
 
-            toc_message_parts.append("<toc_entries_to_translate>")
-            toc_message_parts.append(json.dumps(toc_entries, ensure_ascii=False, indent=2))
-            toc_message_parts.append("</toc_entries_to_translate>")
+            toc_block_parts.append("<toc_entries_to_translate>")
+            toc_block_parts.append(json.dumps(toc_entries, ensure_ascii=False, indent=2))
+            toc_block_parts.append("</toc_entries_to_translate>")
 
-            base_messages.append({"role": "user", "content": "\n".join(toc_message_parts)})
+            bundled_context_parts.append("\n".join(toc_block_parts))
 
             self.update_progress.emit(
                 f"📑 Including {len(toc_entries)} TOC entries for inline translation"
@@ -738,10 +743,13 @@ class TranslationWorker(QObject):
         if self.base_prompt_position == 'top':
             base_messages.append({"role": "user", "content": BASE_INSTRUCTION})
 
-        # Add current chunk to translate
+        # Final user message: bundled context blocks (if any) above <source_text>, all in one turn
+        chunk_message = "\n\n".join(bundled_context_parts + [f"<source_text>\n{chunk}\n</source_text>"])
+
+        # Add instruction (system role) and the bundled chunk message
         base_messages.extend([
-            {"role": "user", "content": instruction},
-            {"role": "user", "content": f"<source_text>\n{chunk}\n</source_text>"},
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": chunk_message},
         ])
 
         # Attempt translation with provider fallback
@@ -780,7 +788,9 @@ class TranslationWorker(QObject):
             json_schema["named_persons"] = [
                 {
                     "original": "original_name",
-                    "translated": "translated_name",
+                    "first_name": "translated_first_name",
+                    "middle_names": ["translated_middle_name", "..."],
+                    "last_name": "translated_last_name_or_empty_string",
                     "gender": "male/female/not_clear"
                 }
             ]
@@ -930,10 +940,15 @@ class TranslationWorker(QObject):
                     "type": "object",
                     "properties": {
                         "original": {"type": "string"},
-                        "translated": {"type": "string"},
+                        "first_name": {"type": "string"},
+                        "middle_names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "last_name": {"type": "string"},
                         "gender": {"type": "string", "enum": ["male", "female", "not_clear"]},
                     },
-                    "required": ["original", "translated", "gender"],
+                    "required": ["original", "first_name", "middle_names", "last_name", "gender"],
                     "additionalProperties": False,
                 },
             }
@@ -1132,7 +1147,7 @@ class TranslationWorker(QObject):
                             "X-Title": "EpubTranslate"
                         }
 
-                    print(request_params["messages"])
+                    # print(request_params["messages"])
 
                     stream = client.chat.completions.create(
                         timeout=self.timeout,

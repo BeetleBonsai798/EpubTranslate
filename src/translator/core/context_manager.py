@@ -12,6 +12,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def format_character_name(char_data: Dict) -> str:
+    """Format a character entry's name parts into a single display string.
+
+    Produces strings like "first=Taro, middle=Mary, last=Tanaka" — omitting
+    middle/last when absent so single-given-name characters render as just
+    "first=Sakura".
+    """
+    parts = [f"first={char_data.get('first_name', '')}"]
+
+    middle_names = char_data.get('middle_names') or []
+    if middle_names:
+        parts.append(f"middle={' '.join(middle_names)}")
+
+    last_name = char_data.get('last_name', '')
+    if last_name:
+        parts.append(f"last={last_name}")
+
+    return ", ".join(parts)
+
+
 class ContextManager:
     """Manages translation context including characters, places, terms, and notes.
 
@@ -249,11 +269,12 @@ class ContextManager:
             logger.error(f"Error saving notes file: {e}", exc_info=True)
             return False
 
-    def update_characters(self, characters_data: List[Dict[str, str]]) -> None:
+    def update_characters(self, characters_data: List[Dict]) -> None:
         """Update character list with new data.
 
         Args:
-            characters_data: List of character dictionaries with 'original', 'translated', 'gender'
+            characters_data: List of character dicts with 'original', 'first_name',
+                'middle_names' (list), 'last_name', and 'gender'.
         """
         if not self.context_mode or not characters_data:
             return
@@ -265,33 +286,114 @@ class ContextManager:
             if not isinstance(char_info, dict):
                 continue
 
-            if 'original' not in char_info or 'translated' not in char_info:
+            if 'original' not in char_info or 'first_name' not in char_info:
                 continue
 
             orig = char_info['original'].strip()
-            trans = char_info['translated'].strip()
-            gender = char_info.get('gender', 'not_clear').strip().lower()
+            first_name = char_info['first_name'].strip()
+            last_name = char_info.get('last_name', '').strip()
 
-            # Validate gender
+            middle_raw = char_info.get('middle_names', []) or []
+            if not isinstance(middle_raw, list):
+                middle_raw = []
+            middle_names = [
+                m.strip() for m in middle_raw
+                if isinstance(m, str) and m.strip()
+            ]
+
+            gender = char_info.get('gender', 'not_clear').strip().lower()
             if gender not in self.VALID_GENDERS:
                 gender = 'not_clear'
 
-            if not orig or not trans:
+            if not orig or not first_name:
                 continue
 
-            if orig not in self.characters:
-                self.characters[orig] = {'translated': trans, 'gender': gender}
-                added += 1
-            else:
-                self.characters[orig]['translated'] = trans
-                # Only update gender if current is unclear and new is clear
-                if self.characters[orig]['gender'] == 'not_clear' and gender != 'not_clear':
-                    self.characters[orig]['gender'] = gender
+            # Step 1: direct key match — update fields, but never erase known info
+            if orig in self.characters:
+                existing = self.characters[orig]
+                existing['first_name'] = first_name
+                if last_name or not existing.get('last_name'):
+                    existing['last_name'] = last_name
+                if middle_names or not existing.get('middle_names'):
+                    existing['middle_names'] = middle_names
+                if existing.get('gender', 'not_clear') == 'not_clear' and gender != 'not_clear':
+                    existing['gender'] = gender
                 updated += 1
+                continue
+
+            # Step 2: merge against an existing entry that's the same person
+            # (same first_name, with exactly one side missing the surname)
+            merge_target = self._find_character_merge_target(first_name, last_name)
+            if merge_target is not None:
+                target_orig, target_data = merge_target
+                target_last = target_data.get('last_name', '')
+
+                if last_name and not target_last:
+                    # Incoming form is more complete — promote it to canonical
+                    merged_gender = target_data.get('gender', 'not_clear')
+                    if merged_gender == 'not_clear' and gender != 'not_clear':
+                        merged_gender = gender
+
+                    new_key = orig if len(orig) >= len(target_orig) else target_orig
+                    merged_middle = middle_names or target_data.get('middle_names', [])
+
+                    if new_key != target_orig:
+                        del self.characters[target_orig]
+                    self.characters[new_key] = {
+                        'first_name': first_name,
+                        'middle_names': merged_middle,
+                        'last_name': last_name,
+                        'gender': merged_gender,
+                    }
+                    logger.info(
+                        f"Merged character: '{target_orig}' + incoming '{orig}' → '{new_key}' (last_name='{last_name}')"
+                    )
+                else:
+                    # Existing entry is already the more complete one — only refine gender
+                    if target_data.get('gender', 'not_clear') == 'not_clear' and gender != 'not_clear':
+                        target_data['gender'] = gender
+                    logger.info(
+                        f"Skipped duplicate short-form '{orig}' for existing character '{target_orig}'"
+                    )
+                updated += 1
+                continue
+
+            # Step 3: genuinely new character
+            self.characters[orig] = {
+                'first_name': first_name,
+                'middle_names': middle_names,
+                'last_name': last_name,
+                'gender': gender,
+            }
+            added += 1
 
         if added or updated:
             logger.info(f"Updated characters: {added} added, {updated} modified")
             self.save_characters()
+
+    def _find_character_merge_target(
+        self,
+        first_name: str,
+        last_name: str
+    ) -> Optional[tuple]:
+        """Find an existing entry that represents the same character.
+
+        Match rule: same first_name (case-insensitive), with exactly one side
+        having a surname set. This catches the common case where the LLM emits
+        a short-form mention ("マサト") and a full-form mention ("マサト・イトウ")
+        as two separate entries for the same person.
+        """
+        first_lower = first_name.lower()
+        incoming_has_last = bool(last_name)
+
+        for existing_orig, existing_data in self.characters.items():
+            if existing_data.get('first_name', '').lower() != first_lower:
+                continue
+            existing_has_last = bool(existing_data.get('last_name', ''))
+            if existing_has_last != incoming_has_last:
+                return (existing_orig, existing_data)
+
+        return None
 
     def update_places(self, places_data: List[Dict[str, str]]) -> None:
         """Update place list with new data.
@@ -421,7 +523,7 @@ class ContextManager:
             return ""
 
         char_list = [
-            f"{orig} : {data['translated']} : {data['gender']}"
+            f"{orig} : {format_character_name(data)} : {data.get('gender', 'not_clear')}"
             for orig, data in self.characters.items()
         ]
         char_string = "\n".join(char_list)
@@ -528,7 +630,7 @@ class ContextManager:
         char_prompt = ""
         if relevant_chars:
             char_list = [
-                f"{orig} : {data['translated']} : {data['gender']}"
+                f"{orig} : {format_character_name(data)} : {data.get('gender', 'not_clear')}"
                 for orig, data in relevant_chars.items()
             ]
             char_prompt = f"Existing Character Translations:\n" + "\n".join(char_list) + "\n\n"
