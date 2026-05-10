@@ -667,7 +667,7 @@ class TranslationWorker(QObject):
             for prev_chapter in self.previous_chapter_pairs:
                 base_messages.append({
                     "role": "user",
-                    "content": f"PREVIOUS CHAPTER {prev_chapter['chapter_number']} (for context only):\n{prev_chapter['original']}"
+                    "content": f"<previous_chapter number=\"{prev_chapter['chapter_number']}\" purpose=\"context_only\">\n{prev_chapter['original']}\n</previous_chapter>"
                 })
                 base_messages.append({
                     "role": "assistant",
@@ -684,7 +684,7 @@ class TranslationWorker(QObject):
             for prev_chunk, prev_trans in zip(current_chapter_chunks, current_chapter_translations):
                 base_messages.append({
                     "role": "user",
-                    "content": f"CURRENT CHAPTER - PREVIOUS PART:\n{prev_chunk}"
+                    "content": f"<current_chapter_previous_part>\n{prev_chunk}\n</current_chapter_previous_part>"
                 })
                 base_messages.append({
                     "role": "assistant",
@@ -704,13 +704,15 @@ class TranslationWorker(QObject):
             prev_toc = self._get_previous_toc_entries(chapter_number)
             toc_message_parts = []
             if prev_toc:
-                toc_message_parts.append("Previously translated TOC entries (for naming consistency):")
+                toc_message_parts.append("<previous_toc_translations purpose=\"naming_consistency\">")
                 for entry in prev_toc:
                     toc_message_parts.append(f"- {entry['original']} → {entry['translated']}")
+                toc_message_parts.append("</previous_toc_translations>")
                 toc_message_parts.append("")
 
-            toc_message_parts.append("TOC entries for this chapter to translate:")
+            toc_message_parts.append("<toc_entries_to_translate>")
             toc_message_parts.append(json.dumps(toc_entries, ensure_ascii=False, indent=2))
+            toc_message_parts.append("</toc_entries_to_translate>")
 
             base_messages.append({"role": "user", "content": "\n".join(toc_message_parts)})
 
@@ -738,8 +740,8 @@ class TranslationWorker(QObject):
 
         # Add current chunk to translate
         base_messages.extend([
-            {"role": "user", "content": f"CURRENT CHAPTER - TEXT TO TRANSLATE:\n```[START]\n{chunk}\n```[END]"},
             {"role": "user", "content": instruction},
+            {"role": "user", "content": f"<source_text>\n{chunk}\n</source_text>"},
         ])
 
         # Attempt translation with provider fallback
@@ -775,7 +777,7 @@ class TranslationWorker(QObject):
 
         # Only include context fields if context_mode is enabled
         if self.context_mode:
-            json_schema["characters"] = [
+            json_schema["named_persons"] = [
                 {
                     "original": "original_name",
                     "translated": "translated_name",
@@ -862,7 +864,6 @@ class TranslationWorker(QObject):
         notes_instruction = ""
         if self.notes_mode:
             notes_instruction = NOTES_MANAGEMENT_INSTRUCTION
-            context_notes_instruction_parts.append(notes_instruction)
 
         # JSON format instruction - this will be conditionally placed
         notes_reminder = ""
@@ -870,18 +871,23 @@ class TranslationWorker(QObject):
             notes_reminder = NOTES_REMINDER
 
         json_format_instruction = (
-            f"Respond in utf-8 encoding with ONLY a VALID JSON object in this format:\n"
+            f"<json_schema>\n"
+            f"Respond with ONLY a VALID JSON object matching this schema (UTF-8 encoding):\n"
             f"```json\n{json.dumps(json_schema, indent=2, ensure_ascii=False)}\n```\n"
+            f"</json_schema>\n"
             f"{notes_reminder}"
         )
 
-        # Build context and notes instructions for system prompt (when power steering enabled)
+        # Build context and notes instructions for system prompt (when power steering disabled)
         context_notes_system_instruction = ""
         if context_notes_instruction_parts:
             context_notes_system_instruction = (
-                f"ALWAYS list in this EXACT ORDER:\n"
-                f"{''.join(context_notes_instruction_parts)}\n"
+                f"<output_fields order=\"must follow\">\n"
+                f"{''.join(context_notes_instruction_parts)}"
+                f"</output_fields>\n"
             )
+            if notes_instruction:
+                context_notes_system_instruction += notes_instruction
 
         # Build the full instruction
         # If power_steering is enabled, include JSON format and context/notes instructions in user instruction (default behavior)
@@ -895,8 +901,9 @@ class TranslationWorker(QObject):
         if self.power_steering:
             full_instruction = (
                 base_instruction +
-                f"ALWAYS list in this EXACT ORDER:\n"
-                f"{''.join(instruction_parts)}\n"
+                f"<output_fields order=\"must follow\">\n"
+                f"{''.join(instruction_parts)}"
+                f"</output_fields>\n"
                 f"{notes_instruction}\n"
                 f"{json_format_instruction}\n"
                 f"{ENDING_INSTRUCTION}"
@@ -917,7 +924,7 @@ class TranslationWorker(QObject):
         required = []
 
         if self.context_mode:
-            properties["characters"] = {
+            properties["named_persons"] = {
                 "type": "array",
                 "items": {
                     "type": "object",
@@ -961,7 +968,7 @@ class TranslationWorker(QObject):
                     "additionalProperties": False,
                 },
             }
-            required.extend(["characters", "places", "terms"])
+            required.extend(["named_persons", "places", "terms"])
 
         if self.notes_mode:
             properties["notes"] = {
@@ -1125,6 +1132,8 @@ class TranslationWorker(QObject):
                             "X-Title": "EpubTranslate"
                         }
 
+                    print(request_params["messages"])
+
                     stream = client.chat.completions.create(
                         timeout=self.timeout,
                         extra_headers=extra_headers if extra_headers else None,
@@ -1230,8 +1239,8 @@ class TranslationWorker(QObject):
 
                         # Update all lists based on enabled modes
                         if self.context_mode:
-                            if 'characters' in json_data:
-                                self.context_manager.update_characters(json_data['characters'])
+                            if 'named_persons' in json_data:
+                                self.context_manager.update_characters(json_data['named_persons'])
                                 self.characters_updated.emit()
                             if 'places' in json_data:
                                 self.context_manager.update_places(json_data['places'])
