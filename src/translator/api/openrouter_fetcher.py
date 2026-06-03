@@ -6,7 +6,9 @@ import requests
 import urllib.parse
 from PySide6.QtCore import QThread, Signal
 
-from ..config import OPENROUTER_MODELS_URL
+from ..providers import PROVIDERS
+
+OPENROUTER_MODELS_URL = PROVIDERS['openrouter'].models_url
 
 logger = logging.getLogger(__name__)
 

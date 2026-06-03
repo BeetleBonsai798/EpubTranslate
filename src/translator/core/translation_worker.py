@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, Signal
 from openai import OpenAI
 from bs4 import BeautifulSoup
 
-from ..config import OPENROUTER_BASE_URL, DEFAULT_PROVIDERS
+from ..providers import PROVIDERS
 from .context_manager import ContextManager
 from .context_filter import ContextFilter
 from .prompts import (
@@ -93,16 +93,17 @@ class TranslationWorker(QObject):
         self.json_output_mode = json_output_mode
 
         # Endpoint configuration
+        openrouter = PROVIDERS['openrouter']
         self.endpoint_config = endpoint_config or {
             'endpoint_type': 'openrouter',
-            'base_url': OPENROUTER_BASE_URL,
+            'base_url': openrouter.default_base_url,
             'api_key': api_key
         }
 
         if providers_list and len(providers_list) > 0:
             self.providers = providers_list
         else:
-            self.providers = list(DEFAULT_PROVIDERS)
+            self.providers = list(openrouter.default_provider_order)
 
         # Initialize context manager
         self.context_manager = ContextManager(
@@ -1033,19 +1034,9 @@ class TranslationWorker(QObject):
     def _attempt_translation(self, base_messages, has_toc=False):
         """Attempt translation with provider fallback and per-provider retries."""
         endpoint_type = self.endpoint_config.get('endpoint_type', 'openrouter')
-
-        # OpenRouter rotates through configured providers; DeepSeek and Custom
-        # have a single upstream so we just retry on `None`.
-        if endpoint_type == 'openrouter':
-            provider_list = self.providers
-        else:
-            provider_list = [None]
-
-        endpoint_label = {
-            'openrouter': 'OpenRouter',
-            'deepseek': 'DeepSeek',
-            'custom': 'custom endpoint',
-        }.get(endpoint_type, endpoint_type)
+        provider_obj = PROVIDERS.get(endpoint_type, PROVIDERS['openrouter'])
+        provider_list = provider_obj.get_provider_list(self.providers)
+        endpoint_label = provider_obj.display_name
 
         # Iterate through each provider
         for provider_index, current_provider in enumerate(provider_list):
@@ -1072,7 +1063,6 @@ class TranslationWorker(QObject):
                 # Create a fresh copy of base messages for this attempt
                 messages_for_provider = [msg.copy() for msg in base_messages]
 
-                # Clean up any openrouter-specific stuff that might interfere
                 for msg in messages_for_provider:
                     msg.pop('prefix', None)
 
@@ -1088,66 +1078,22 @@ class TranslationWorker(QObject):
                         'top_p': self.top_p,
                     }
 
-                    extra_body = {}
+                    json_schema = (
+                        self._build_json_schema(has_toc=has_toc)
+                        if self.json_output_mode == 'json_schema' else None
+                    )
 
-                    # Add top_k to extra_body if not 0 (0 means disabled)
-                    if self.top_k > 0:
-                        extra_body['top_k'] = self.top_k
-
-                    reasoning_enabled = self.reasoning_config.get('enabled', False)
-
-                    if endpoint_type == 'openrouter':
-                        if current_provider:
-                            extra_body['provider'] = {
-                                'order': [current_provider],
-                                'allow_fallbacks': False
-                            }
-                        if reasoning_enabled:
-                            r = {}
-                            if self.reasoning_config.get('max_tokens', 0) > 0:
-                                r['max_tokens'] = self.reasoning_config['max_tokens']
-                            else:
-                                r['effort'] = self.reasoning_config.get('effort', 'medium')
-                            if self.reasoning_config.get('exclude'):
-                                r['exclude'] = True
-                            extra_body['reasoning'] = r
-                    elif endpoint_type == 'deepseek':
-                        # DeepSeek v4 thinking mode is enabled by default — toggle explicitly
-                        if reasoning_enabled:
-                            extra_body['thinking'] = {'type': 'enabled'}
-                            request_params['reasoning_effort'] = self.reasoning_config.get('effort', 'high')
-                        else:
-                            extra_body['thinking'] = {'type': 'disabled'}
-                    # custom endpoint: no reasoning, no provider routing
-
-                    # Configure response_format based on json_output_mode
-                    if self.json_output_mode == 'json_object':
-                        request_params['response_format'] = {'type': 'json_object'}
-                    elif self.json_output_mode == 'json_schema':
-                        if endpoint_type == 'openrouter':
-                            request_params['response_format'] = {
-                                'type': 'json_schema',
-                                'json_schema': self._build_json_schema(has_toc=has_toc),
-                            }
-                        else:
-                            # Strict json_schema is OpenRouter-only; degrade gracefully
-                            request_params['response_format'] = {'type': 'json_object'}
+                    extra_body, extra_headers = provider_obj.prepare_request(
+                        request_params, self.reasoning_config,
+                        self.json_output_mode, json_schema=json_schema,
+                        current_provider=current_provider, top_k=self.top_k,
+                    )
 
                     if extra_body:
                         request_params['extra_body'] = extra_body
 
                     client = OpenAI(api_key=self.endpoint_config['api_key'])
                     client.base_url = self.endpoint_config['base_url']
-
-                    # Add extra headers for OpenRouter
-                    extra_headers = {}
-                    if endpoint_type == 'openrouter':
-                        extra_headers = {
-                            "HTTP-Referer": "https://github.com/BeetleBonsai798/EpubTranslate",
-                            "X-Title": "EpubTranslate"
-                        }
-
-                    # print(request_params["messages"])
 
                     stream = client.chat.completions.create(
                         timeout=self.timeout,

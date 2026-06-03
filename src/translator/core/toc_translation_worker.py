@@ -7,7 +7,7 @@ from openai import OpenAI
 from ebooklib import epub
 from bs4 import BeautifulSoup
 
-from ..config import DEFAULT_PROVIDERS
+from ..providers import PROVIDERS
 from .context_manager import ContextManager
 from .context_filter import ContextFilter
 
@@ -60,7 +60,7 @@ class TocTranslationWorker(QObject):
         if providers_list and len(providers_list) > 0:
             self.providers = providers_list
         else:
-            self.providers = list(DEFAULT_PROVIDERS)
+            self.providers = list(PROVIDERS['openrouter'].default_provider_order)
 
     def _setup_context_filter(self):
         self._context_filter = ContextFilter()
@@ -227,23 +227,14 @@ class TocTranslationWorker(QObject):
         base_url = self.endpoint_config['base_url']
         endpoint_type = self.endpoint_config.get('endpoint_type', 'openrouter')
         model_id = self.endpoint_config.get('model', '')
+        provider_obj = PROVIDERS.get(endpoint_type, PROVIDERS['openrouter'])
 
         if not api_key:
             self.update_progress.emit("❌ Error: No API key configured", "red")
             return None
 
-        # OpenRouter rotates through configured providers; DeepSeek and Custom
-        # have a single upstream so we just retry on `None`.
-        if endpoint_type == 'openrouter':
-            provider_list = self.providers
-        else:
-            provider_list = [None]
-
-        endpoint_label = {
-            'openrouter': 'OpenRouter',
-            'deepseek': 'DeepSeek',
-            'custom': 'custom endpoint',
-        }.get(endpoint_type, endpoint_type)
+        provider_list = provider_obj.get_provider_list(self.providers)
+        endpoint_label = provider_obj.display_name
 
         last_response_text = ""
 
@@ -289,74 +280,46 @@ class TocTranslationWorker(QObject):
                     if self.top_p != 1.0:
                         api_params["top_p"] = self.top_p
 
-                    extra_body = {}
-                    if self.top_k != 0:
-                        extra_body['top_k'] = self.top_k
-
-                    reasoning_enabled = self.reasoning_config.get('enabled', False)
-
-                    if endpoint_type == 'openrouter':
-                        if current_provider:
-                            extra_body['provider'] = {
-                                'order': [current_provider],
-                                'allow_fallbacks': False
-                            }
-                        if reasoning_enabled:
-                            r = {}
-                            if self.reasoning_config.get('max_tokens', 0) > 0:
-                                r['max_tokens'] = self.reasoning_config['max_tokens']
-                            else:
-                                r['effort'] = self.reasoning_config.get('effort', 'medium')
-                            if self.reasoning_config.get('exclude'):
-                                r['exclude'] = True
-                            extra_body['reasoning'] = r
-                    elif endpoint_type == 'deepseek':
-                        if reasoning_enabled:
-                            extra_body['thinking'] = {'type': 'enabled'}
-                            api_params['reasoning_effort'] = self.reasoning_config.get('effort', 'high')
-                        else:
-                            extra_body['thinking'] = {'type': 'disabled'}
-
-                    # TOC translation depends on JSON parsing; default to json_object
-                    # whenever the user hasn't asked for json_schema strict mode.
-                    if self.json_output_mode == 'json_schema' and endpoint_type == 'openrouter':
-                        api_params['response_format'] = {
-                            'type': 'json_schema',
-                            'json_schema': {
-                                'name': 'toc_translations',
-                                'strict': True,
-                                'schema': {
-                                    'type': 'object',
-                                    'properties': {
-                                        'translations': {
-                                            'type': 'array',
-                                            'items': {
-                                                'type': 'object',
-                                                'properties': {
-                                                    'index': {'type': 'integer'},
-                                                    'translated': {'type': 'string'},
-                                                },
-                                                'required': ['index', 'translated'],
-                                                'additionalProperties': False,
-                                            },
+                    toc_json_schema = {
+                        'name': 'toc_translations',
+                        'strict': True,
+                        'schema': {
+                            'type': 'object',
+                            'properties': {
+                                'translations': {
+                                    'type': 'array',
+                                    'items': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'index': {'type': 'integer'},
+                                            'translated': {'type': 'string'},
                                         },
+                                        'required': ['index', 'translated'],
+                                        'additionalProperties': False,
                                     },
-                                    'required': ['translations'],
-                                    'additionalProperties': False,
                                 },
                             },
-                        }
-                    else:
-                        api_params['response_format'] = {'type': 'json_object'}
+                            'required': ['translations'],
+                            'additionalProperties': False,
+                        },
+                    }
+
+                    json_schema = (
+                        toc_json_schema
+                        if self.json_output_mode == 'json_schema' else None
+                    )
+                    json_mode = self.json_output_mode if self.json_output_mode != 'off' else 'json_object'
+
+                    extra_body, extra_headers = provider_obj.prepare_request(
+                        api_params, self.reasoning_config,
+                        json_mode, json_schema=json_schema,
+                        current_provider=current_provider, top_k=self.top_k,
+                    )
 
                     if extra_body:
                         api_params['extra_body'] = extra_body
-
-                    if endpoint_type == 'openrouter':
-                        api_params['extra_headers'] = {
-                            "HTTP-Referer": "https://github.com/BeetleBonsai798/EpubTranslate",
-                            "X-Title": "EpubTranslate"
-                        }
+                    if extra_headers:
+                        api_params['extra_headers'] = extra_headers
 
                     response_stream = client.chat.completions.create(**api_params)
 

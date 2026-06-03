@@ -17,14 +17,9 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLine
 from PySide6.QtGui import QFont, QAction, QTextCursor
 from ebooklib import epub
 
-from ..config import (
-    ConfigManager,
-    OPENROUTER_BASE_URL,
-    DEFAULT_PROVIDERS,
-    DEEPSEEK_BASE_URL,
-    DEEPSEEK_DEFAULT_MODELS,
-)
-from ..api import OpenRouterFetcher
+from ..config import ConfigManager
+from ..providers import PROVIDERS
+from ..api import OpenRouterFetcher, ModelFetcher
 from ..core import TranslationWorker
 from .chapter_overview_widget import ChapterOverviewWidget
 
@@ -203,125 +198,119 @@ class EpubTranslatorApp(QMainWindow):
         layout.addWidget(file_group)
 
     def _add_api_configuration(self, layout):
-        """Add API configuration section."""
+        """Add API configuration section — built from the provider registry."""
         api_group = QGroupBox("API Configuration")
         api_layout = QVBoxLayout()
 
-        # OpenRouter / DeepSeek / Custom toggle
+        # Radio buttons — one per registered provider
         endpoint_toggle_layout = QHBoxLayout()
-        self.openrouter_radio = QRadioButton("OpenRouter")
-        self.deepseek_radio = QRadioButton("DeepSeek")
-        self.custom_endpoint_radio = QRadioButton("Custom Endpoint")
-        self.openrouter_radio.setChecked(True)
-        self.openrouter_radio.toggled.connect(self.on_endpoint_type_changed)
-        self.deepseek_radio.toggled.connect(self.on_endpoint_type_changed)
-        self.custom_endpoint_radio.toggled.connect(self.on_endpoint_type_changed)
-        endpoint_toggle_layout.addWidget(self.openrouter_radio)
-        endpoint_toggle_layout.addWidget(self.deepseek_radio)
-        endpoint_toggle_layout.addWidget(self.custom_endpoint_radio)
+        self.provider_radios = {}
+        first = True
+        for key, provider in PROVIDERS.items():
+            radio = QRadioButton(provider.display_name)
+            if first:
+                radio.setChecked(True)
+                first = False
+            radio.toggled.connect(self.on_endpoint_type_changed)
+            endpoint_toggle_layout.addWidget(radio)
+            self.provider_radios[key] = radio
         endpoint_toggle_layout.addStretch()
         api_layout.addLayout(endpoint_toggle_layout)
 
-        # OpenRouter API Key
-        self.openrouter_container = QWidget()
-        openrouter_layout = QVBoxLayout()
-        openrouter_layout.setContentsMargins(0, 0, 0, 0)
+        # OpenRouter only needs an API key here; its model/provider browser
+        # lives in the separate Model & Providers section.
+        self.provider_widgets = {}
+        or_provider = PROVIDERS['openrouter']
+        or_container = QWidget()
+        or_layout = QVBoxLayout()
+        or_layout.setContentsMargins(0, 0, 0, 0)
+        or_key_layout = QHBoxLayout()
+        or_key_layout.addWidget(QLabel("OpenRouter API Key:"))
+        or_key_entry = QLineEdit()
+        or_key_entry.setEchoMode(QLineEdit.Password)
+        or_key_entry.setPlaceholderText("Enter your OpenRouter API key...")
+        or_key_layout.addWidget(or_key_entry)
+        or_show_btn = QPushButton("👁")
+        or_show_btn.setMaximumWidth(30)
+        or_show_btn.clicked.connect(
+            lambda: self._toggle_key_visibility(or_key_entry, or_show_btn)
+        )
+        or_key_layout.addWidget(or_show_btn)
+        or_layout.addLayout(or_key_layout)
+        or_container.setLayout(or_layout)
+        api_layout.addWidget(or_container)
+        self.provider_widgets['openrouter'] = {
+            'container': or_container,
+            'api_key': or_key_entry,
+        }
 
-        api_key_layout = QHBoxLayout()
-        api_key_layout.addWidget(QLabel("OpenRouter API Key:"))
-        self.api_key_entry = QLineEdit()
-        self.api_key_entry.setEchoMode(QLineEdit.Password)
-        self.api_key_entry.setPlaceholderText("Enter your OpenRouter API key...")
-        api_key_layout.addWidget(self.api_key_entry)
-
-        self.show_api_key_btn = QPushButton("👁")
-        self.show_api_key_btn.setMaximumWidth(30)
-        self.show_api_key_btn.clicked.connect(self.toggle_api_key_visibility)
-        api_key_layout.addWidget(self.show_api_key_btn)
-
-        openrouter_layout.addLayout(api_key_layout)
-        self.openrouter_container.setLayout(openrouter_layout)
-        api_layout.addWidget(self.openrouter_container)
-
-        # DeepSeek Endpoint Configuration
-        self.deepseek_container = QWidget()
-        deepseek_layout = QVBoxLayout()
-        deepseek_layout.setContentsMargins(0, 0, 0, 0)
-
-        ds_url_layout = QHBoxLayout()
-        ds_url_layout.addWidget(QLabel("DeepSeek URL:"))
-        self.deepseek_endpoint_url = QLineEdit()
-        self.deepseek_endpoint_url.setPlaceholderText(DEEPSEEK_BASE_URL)
-        ds_url_layout.addWidget(self.deepseek_endpoint_url)
-        deepseek_layout.addLayout(ds_url_layout)
-
-        ds_key_layout = QHBoxLayout()
-        ds_key_layout.addWidget(QLabel("DeepSeek API Key:"))
-        self.deepseek_api_key_entry = QLineEdit()
-        self.deepseek_api_key_entry.setEchoMode(QLineEdit.Password)
-        self.deepseek_api_key_entry.setPlaceholderText("Enter your DeepSeek API key...")
-        ds_key_layout.addWidget(self.deepseek_api_key_entry)
-
-        self.show_deepseek_key_btn = QPushButton("👁")
-        self.show_deepseek_key_btn.setMaximumWidth(30)
-        self.show_deepseek_key_btn.clicked.connect(self.toggle_deepseek_key_visibility)
-        ds_key_layout.addWidget(self.show_deepseek_key_btn)
-        deepseek_layout.addLayout(ds_key_layout)
-
-        ds_model_layout = QHBoxLayout()
-        ds_model_layout.addWidget(QLabel("Model:"))
-        self.deepseek_model_combo = QComboBox()
-        self.deepseek_model_combo.setEditable(True)
-        for model_name in DEEPSEEK_DEFAULT_MODELS:
-            self.deepseek_model_combo.addItem(model_name)
-        ds_model_layout.addWidget(self.deepseek_model_combo)
-        deepseek_layout.addLayout(ds_model_layout)
-
-        self.deepseek_container.setLayout(deepseek_layout)
-        self.deepseek_container.setVisible(False)
-        api_layout.addWidget(self.deepseek_container)
-
-        # Custom Endpoint Configuration
-        self.custom_endpoint_container = QWidget()
-        custom_layout = QVBoxLayout()
-        custom_layout.setContentsMargins(0, 0, 0, 0)
-
-        # Endpoint URL
-        url_layout = QHBoxLayout()
-        url_layout.addWidget(QLabel("Endpoint URL:"))
-        self.custom_endpoint_url = QLineEdit()
-        self.custom_endpoint_url.setPlaceholderText("https://api.example.com/v1")
-        url_layout.addWidget(self.custom_endpoint_url)
-        custom_layout.addLayout(url_layout)
-
-        # Custom API Key
-        custom_key_layout = QHBoxLayout()
-        custom_key_layout.addWidget(QLabel("API Key:"))
-        self.custom_endpoint_key = QLineEdit()
-        self.custom_endpoint_key.setEchoMode(QLineEdit.Password)
-        self.custom_endpoint_key.setPlaceholderText("Enter custom endpoint API key...")
-        custom_key_layout.addWidget(self.custom_endpoint_key)
-
-        self.show_custom_key_btn = QPushButton("👁")
-        self.show_custom_key_btn.setMaximumWidth(30)
-        self.show_custom_key_btn.clicked.connect(self.toggle_custom_key_visibility)
-        custom_key_layout.addWidget(self.show_custom_key_btn)
-        custom_layout.addLayout(custom_key_layout)
-
-        # Model name for custom endpoint
-        model_layout = QHBoxLayout()
-        model_layout.addWidget(QLabel("Model Name:"))
-        self.custom_endpoint_model = QLineEdit()
-        self.custom_endpoint_model.setPlaceholderText("e.g., gpt-4, deepseek-chat")
-        model_layout.addWidget(self.custom_endpoint_model)
-        custom_layout.addLayout(model_layout)
-
-        self.custom_endpoint_container.setLayout(custom_layout)
-        self.custom_endpoint_container.setVisible(False)
-        api_layout.addWidget(self.custom_endpoint_container)
+        # All other providers get a generic container
+        for key, provider in PROVIDERS.items():
+            if key == 'openrouter':
+                continue
+            container, widgets = self._build_provider_container(provider)
+            api_layout.addWidget(container)
+            self.provider_widgets[key] = widgets
 
         api_group.setLayout(api_layout)
         layout.addWidget(api_group)
+
+    def _build_provider_container(self, provider):
+        """Build a standard provider container (URL + API key + model [+ fetch])."""
+        container = QWidget()
+        container_layout = QVBoxLayout()
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        widgets = {'container': container}
+
+        if provider.has_configurable_url:
+            url_layout = QHBoxLayout()
+            url_layout.addWidget(QLabel(f"{provider.display_name} URL:"))
+            url_entry = QLineEdit()
+            url_entry.setPlaceholderText(
+                provider.default_base_url or "https://api.example.com/v1"
+            )
+            url_layout.addWidget(url_entry)
+            container_layout.addLayout(url_layout)
+            widgets['url'] = url_entry
+
+        key_layout = QHBoxLayout()
+        key_layout.addWidget(QLabel(f"{provider.display_name} API Key:"))
+        key_entry = QLineEdit()
+        key_entry.setEchoMode(QLineEdit.Password)
+        key_entry.setPlaceholderText(f"Enter your {provider.display_name} API key...")
+        key_layout.addWidget(key_entry)
+        show_btn = QPushButton("👁")
+        show_btn.setMaximumWidth(30)
+        show_btn.clicked.connect(
+            lambda checked=False, k=key_entry, b=show_btn: self._toggle_key_visibility(k, b)
+        )
+        key_layout.addWidget(show_btn)
+        container_layout.addLayout(key_layout)
+        widgets['api_key'] = key_entry
+
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(QLabel("Model:"))
+        model_combo = QComboBox()
+        model_combo.setEditable(True)
+        for m in provider.default_models:
+            model_combo.addItem(m)
+        model_layout.addWidget(model_combo)
+
+        if provider.can_fetch_models:
+            fetch_btn = QPushButton("Fetch")
+            fetch_btn.setMaximumWidth(60)
+            fetch_btn.clicked.connect(
+                lambda checked=False, p=provider: self._fetch_provider_models(p)
+            )
+            model_layout.addWidget(fetch_btn)
+            widgets['fetch_btn'] = fetch_btn
+
+        container_layout.addLayout(model_layout)
+        widgets['model'] = model_combo
+
+        container.setLayout(container_layout)
+        container.setVisible(False)
+        return container, widgets
 
     def _add_model_selection(self, layout):
         """Add model selection section."""
@@ -769,27 +758,27 @@ class EpubTranslatorApp(QMainWindow):
         """Load configuration values to UI components."""
         # Endpoint type
         endpoint_type = self.config.get('endpoint_type', 'openrouter')
-        if endpoint_type == 'deepseek':
-            self.deepseek_radio.setChecked(True)
-        elif endpoint_type == 'custom':
-            self.custom_endpoint_radio.setChecked(True)
-        else:
-            self.openrouter_radio.setChecked(True)
+        radio = self.provider_radios.get(endpoint_type, self.provider_radios['openrouter'])
+        radio.setChecked(True)
 
-        # API Keys and endpoints
-        self.api_key_entry.setText(self.config.get('api_key', ''))
-        self.custom_endpoint_url.setText(self.config.get('custom_endpoint_url', ''))
-        self.custom_endpoint_key.setText(self.config.get('custom_endpoint_key', ''))
-        self.custom_endpoint_model.setText(self.config.get('custom_endpoint_model', ''))
-        self.deepseek_endpoint_url.setText(
-            self.config.get('deepseek_endpoint_url', DEEPSEEK_BASE_URL)
-        )
-        self.deepseek_api_key_entry.setText(self.config.get('deepseek_api_key', ''))
-        self.deepseek_model_combo.setCurrentText(
-            self.config.get('deepseek_model', 'deepseek-v4-pro')
-        )
+        # Load provider-specific fields from config
+        for key, provider in PROVIDERS.items():
+            pw = self.provider_widgets[key]
+            pw['api_key'].setText(
+                self.config.get(provider.api_key_config_key, '')
+            )
+            if 'url' in pw:
+                pw['url'].setText(
+                    self.config.get(
+                        provider.url_config_key, provider.default_base_url
+                    )
+                )
+            if 'model' in pw:
+                pw['model'].setCurrentText(
+                    self.config.get(provider.model_config_key, provider.default_model)
+                )
 
-        # Model
+        # OpenRouter model (lives in the separate model browser, not the provider container)
         self.model_combo.setCurrentText(self.config.get('model', ''))
 
         # Chunk tokens
@@ -868,17 +857,17 @@ class EpubTranslatorApp(QMainWindow):
         """Extract configuration from current UI state."""
         config = {}
 
-        # Endpoint configuration
+        # Endpoint configuration — extract from provider widgets generically
         config['endpoint_type'] = self._get_endpoint_type()
-        config['api_key'] = self.api_key_entry.text()
-        config['custom_endpoint_url'] = self.custom_endpoint_url.text()
-        config['custom_endpoint_key'] = self.custom_endpoint_key.text()
-        config['custom_endpoint_model'] = self.custom_endpoint_model.text()
-        config['deepseek_endpoint_url'] = self.deepseek_endpoint_url.text()
-        config['deepseek_api_key'] = self.deepseek_api_key_entry.text()
-        config['deepseek_model'] = self.deepseek_model_combo.currentText()
+        for key, provider in PROVIDERS.items():
+            pw = self.provider_widgets[key]
+            config[provider.api_key_config_key] = pw['api_key'].text()
+            if 'url' in pw and provider.url_config_key:
+                config[provider.url_config_key] = pw['url'].text()
+            if 'model' in pw:
+                config[provider.model_config_key] = pw['model'].currentText()
 
-        # Model
+        # OpenRouter model (from the separate model browser)
         config['model'] = self.model_combo.currentText()
 
         # Chunk tokens
@@ -1088,68 +1077,87 @@ class EpubTranslatorApp(QMainWindow):
     # ==================== UI Interaction Methods ====================
 
     def on_endpoint_type_changed(self):
-        """Handle switching between OpenRouter, DeepSeek, and custom endpoint."""
+        """Handle switching between providers."""
         endpoint_type = self._get_endpoint_type()
-        is_openrouter = endpoint_type == 'openrouter'
-        is_deepseek = endpoint_type == 'deepseek'
-        is_custom = endpoint_type == 'custom'
+        provider = PROVIDERS[endpoint_type]
 
-        self.openrouter_container.setVisible(is_openrouter)
-        self.deepseek_container.setVisible(is_deepseek)
-        self.custom_endpoint_container.setVisible(is_custom)
-        self.model_selection_container.setVisible(is_openrouter)
+        for key, pw in self.provider_widgets.items():
+            pw['container'].setVisible(key == endpoint_type)
 
-        # Reasoning controls only meaningful for OpenRouter and DeepSeek
-        self.reasoning_group.setEnabled(not is_custom)
+        self.model_selection_container.setVisible(provider.can_fetch_providers)
+        self.reasoning_group.setEnabled(provider.has_reasoning)
 
-        # JSON Schema strict mode is OpenRouter-only — auto-revert if needed
-        if (not is_openrouter
+        if (not provider.has_json_schema
                 and self.json_output_combo.currentData() == 'json_schema'):
             object_index = self.json_output_combo.findData('json_object')
             if object_index >= 0:
                 self.json_output_combo.setCurrentIndex(object_index)
 
-        if is_custom:
-            self.api_status_label.setText("Using custom endpoint - providers not available")
-        elif is_deepseek:
-            self.api_status_label.setText("Using DeepSeek - provider routing not applicable")
-        else:
+        if provider.can_fetch_providers:
             self.api_status_label.setText("")
+        else:
+            self.api_status_label.setText(
+                f"Using {provider.display_name} - provider routing not applicable"
+            )
 
     def _get_endpoint_type(self):
-        """Return the current endpoint type as a string."""
-        if self.deepseek_radio.isChecked():
-            return 'deepseek'
-        if self.custom_endpoint_radio.isChecked():
-            return 'custom'
+        for key, radio in self.provider_radios.items():
+            if radio.isChecked():
+                return key
         return 'openrouter'
 
-    def toggle_api_key_visibility(self):
-        """Toggle API key visibility."""
-        if self.api_key_entry.echoMode() == QLineEdit.Password:
-            self.api_key_entry.setEchoMode(QLineEdit.Normal)
-            self.show_api_key_btn.setText("🙈")
+    @staticmethod
+    def _toggle_key_visibility(key_entry, show_btn):
+        if key_entry.echoMode() == QLineEdit.Password:
+            key_entry.setEchoMode(QLineEdit.Normal)
+            show_btn.setText("🙈")
         else:
-            self.api_key_entry.setEchoMode(QLineEdit.Password)
-            self.show_api_key_btn.setText("👁")
+            key_entry.setEchoMode(QLineEdit.Password)
+            show_btn.setText("👁")
 
-    def toggle_custom_key_visibility(self):
-        """Toggle custom endpoint key visibility."""
-        if self.custom_endpoint_key.echoMode() == QLineEdit.Password:
-            self.custom_endpoint_key.setEchoMode(QLineEdit.Normal)
-            self.show_custom_key_btn.setText("🙈")
-        else:
-            self.custom_endpoint_key.setEchoMode(QLineEdit.Password)
-            self.show_custom_key_btn.setText("👁")
+    def _fetch_provider_models(self, provider):
+        """Fetch models for any provider that supports it (generic /models endpoint)."""
+        if hasattr(self, '_model_fetcher') and self._model_fetcher and self._model_fetcher.isRunning():
+            return
 
-    def toggle_deepseek_key_visibility(self):
-        """Toggle DeepSeek API key visibility."""
-        if self.deepseek_api_key_entry.echoMode() == QLineEdit.Password:
-            self.deepseek_api_key_entry.setEchoMode(QLineEdit.Normal)
-            self.show_deepseek_key_btn.setText("🙈")
-        else:
-            self.deepseek_api_key_entry.setEchoMode(QLineEdit.Password)
-            self.show_deepseek_key_btn.setText("👁")
+        pw = self.provider_widgets[provider.key]
+        base_url = (
+            pw.get('url') and pw['url'].text().strip()
+        ) or provider.default_base_url
+        api_key = pw['api_key'].text().strip()
+
+        if 'fetch_btn' in pw:
+            pw['fetch_btn'].setEnabled(False)
+
+        self.api_status_label.setText(f"Fetching {provider.display_name} models...")
+
+        self._model_fetcher = ModelFetcher(base_url, api_key, provider.display_name)
+        self._model_fetcher.models_fetched.connect(
+            lambda models, p=provider: self._on_provider_models_fetched(p.key, models)
+        )
+        self._model_fetcher.error_occurred.connect(self.on_api_error)
+        self._model_fetcher.progress_updated.connect(self.on_api_progress)
+        self._model_fetcher.finished.connect(
+            lambda p=provider: (
+                self.provider_widgets[p.key].get('fetch_btn')
+                and self.provider_widgets[p.key]['fetch_btn'].setEnabled(True)
+            )
+        )
+        self._model_fetcher.start()
+
+    def _on_provider_models_fetched(self, provider_key, models):
+        """Handle fetched models for any non-OpenRouter provider."""
+        combo = self.provider_widgets[provider_key]['model']
+        previous = combo.currentText()
+        combo.clear()
+        for model_id in models:
+            combo.addItem(model_id)
+        if previous:
+            idx = combo.findText(previous)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                combo.setCurrentText(previous)
 
     def toggle_chapter_selection(self):
         """Toggle between range and CSV chapter selection."""
@@ -1187,7 +1195,7 @@ class EpubTranslatorApp(QMainWindow):
 
     def on_model_changed(self, model_text):
         """Enable fetch providers button when model is selected."""
-        self.fetch_providers_btn.setEnabled(bool(model_text.strip()) and self.openrouter_radio.isChecked())
+        self.fetch_providers_btn.setEnabled(bool(model_text.strip()) and self.provider_radios['openrouter'].isChecked())
 
     def fetch_models(self):
         """Fetch available models from OpenRouter."""
@@ -1292,7 +1300,7 @@ class EpubTranslatorApp(QMainWindow):
         """Handle API operation completion."""
         self.fetch_models_btn.setEnabled(True)
         self.fetch_providers_btn.setEnabled(
-            bool(self.model_combo.currentText().strip()) and self.openrouter_radio.isChecked())
+            bool(self.model_combo.currentText().strip()) and self.provider_radios['openrouter'].isChecked())
 
     def add_provider(self):
         """Add selected providers to the selected list."""
@@ -1428,66 +1436,54 @@ class EpubTranslatorApp(QMainWindow):
             QMessageBox.warning(self, "Warning", "EPUB book object not available!")
             return
 
-        # Check API key based on endpoint type
+        # Build endpoint config from the active provider
         endpoint_type = self._get_endpoint_type()
-        if endpoint_type == 'custom':
-            api_key = self.custom_endpoint_key.text().strip()
-            if not api_key:
-                QMessageBox.warning(self, "Warning", "Please enter your custom endpoint API key!")
+        provider = PROVIDERS[endpoint_type]
+        pw = self.provider_widgets[endpoint_type]
+
+        api_key = pw['api_key'].text().strip()
+        if not api_key:
+            QMessageBox.warning(
+                self, "Warning",
+                f"Please enter your {provider.display_name} API key!"
+            )
+            return
+
+        if provider.has_configurable_url:
+            base_url = (pw.get('url') and pw['url'].text().strip()) or provider.default_base_url
+            if not base_url:
+                QMessageBox.warning(
+                    self, "Warning",
+                    f"Please enter the {provider.display_name} endpoint URL!"
+                )
                 return
-
-            custom_url = self.custom_endpoint_url.text().strip()
-            if not custom_url:
-                QMessageBox.warning(self, "Warning", "Please enter your custom endpoint URL!")
-                return
-
-            model_id = self.custom_endpoint_model.text().strip()
-            if not model_id:
-                QMessageBox.warning(self, "Warning", "Please enter a model name!")
-                return
-
-            selected_providers = []
-            endpoint_config = {
-                'endpoint_type': 'custom',
-                'base_url': custom_url,
-                'api_key': api_key
-            }
-        elif endpoint_type == 'deepseek':
-            api_key = self.deepseek_api_key_entry.text().strip()
-            if not api_key:
-                QMessageBox.warning(self, "Warning", "Please enter your DeepSeek API key!")
-                return
-
-            base_url = self.deepseek_endpoint_url.text().strip() or DEEPSEEK_BASE_URL
-
-            model_id = self.deepseek_model_combo.currentText().strip()
-            if not model_id:
-                QMessageBox.warning(self, "Warning", "Please select a DeepSeek model!")
-                return
-
-            selected_providers = []
-            endpoint_config = {
-                'endpoint_type': 'deepseek',
-                'base_url': base_url,
-                'api_key': api_key
-            }
         else:
-            api_key = self.api_key_entry.text().strip()
-            if not api_key:
-                QMessageBox.warning(self, "Warning", "Please enter your OpenRouter API key!")
-                return
+            base_url = provider.default_base_url
 
+        if provider.can_fetch_providers:
             model_id = self.model_combo.currentText().strip()
+        else:
+            model_id = pw['model'].currentText().strip()
+
+        if not model_id:
+            QMessageBox.warning(self, "Warning", "Please select a model!")
+            return
+
+        selected_providers = []
+        if provider.can_fetch_providers:
             selected_providers = self.get_selected_providers()
             if not selected_providers:
                 QMessageBox.warning(self, "Warning", "No providers selected. Using default providers.")
-                selected_providers = self.config.get('selected_providers') or list(DEFAULT_PROVIDERS)
+                selected_providers = (
+                    self.config.get('selected_providers')
+                    or provider.get_provider_list([])
+                )
 
-            endpoint_config = {
-                'endpoint_type': 'openrouter',
-                'base_url': OPENROUTER_BASE_URL,
-                'api_key': api_key
-            }
+        endpoint_config = {
+            'endpoint_type': endpoint_type,
+            'base_url': base_url,
+            'api_key': api_key,
+        }
 
         # Get selected chapters
         if self.range_radio.isChecked():
@@ -1893,18 +1889,19 @@ class EpubTranslatorApp(QMainWindow):
 
         # Get endpoint config
         endpoint_type = self._get_endpoint_type()
-        if endpoint_type == 'custom':
-            api_key = self.custom_endpoint_key.text().strip()
-            base_url = self.custom_endpoint_url.text().strip()
-            model = self.custom_endpoint_model.text().strip()
-        elif endpoint_type == 'deepseek':
-            api_key = self.deepseek_api_key_entry.text().strip()
-            base_url = self.deepseek_endpoint_url.text().strip() or DEEPSEEK_BASE_URL
-            model = self.deepseek_model_combo.currentText().strip()
+        provider = PROVIDERS[endpoint_type]
+        pw = self.provider_widgets[endpoint_type]
+
+        api_key = pw['api_key'].text().strip()
+        if provider.has_configurable_url:
+            base_url = (pw.get('url') and pw['url'].text().strip()) or provider.default_base_url
         else:
-            api_key = self.api_key_entry.text().strip()
-            base_url = OPENROUTER_BASE_URL
+            base_url = provider.default_base_url
+
+        if provider.can_fetch_providers:
             model = self.model_combo.currentText().strip()
+        else:
+            model = pw['model'].currentText().strip()
 
         endpoint_config = {
             'endpoint_type': endpoint_type,
@@ -1913,14 +1910,12 @@ class EpubTranslatorApp(QMainWindow):
             'model': model,
         }
 
-        # Get selected providers (only meaningful for OpenRouter)
         selected_providers = []
-        if endpoint_type == 'openrouter':
+        if provider.can_fetch_providers:
             for i in range(self.selected_providers_list.count()):
                 selected_providers.append(self.selected_providers_list.item(i).text())
-
             if not selected_providers:
-                selected_providers = list(DEFAULT_PROVIDERS)
+                selected_providers = provider.get_provider_list([])
 
         # Create context manager to load existing context
         context_manager = ContextManager(

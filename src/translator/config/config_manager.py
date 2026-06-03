@@ -6,19 +6,9 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from ..providers import PROVIDERS
+
 logger = logging.getLogger(__name__)
-
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
-DEFAULT_PROVIDERS = ['novita/fp8', 'siliconflow/fp8', 'deepinfra/fp4', 'gmicloud/fp8']
-
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_DEFAULT_MODELS = [
-    "deepseek-v4-flash",
-    "deepseek-v4-pro",
-    "deepseek-chat",
-    "deepseek-reasoner",
-]
 
 
 class ConfigManager:
@@ -29,14 +19,14 @@ class ConfigManager:
     """
 
     def __init__(self):
-        """Initialize configuration manager with default paths and values."""
         project_root = Path(__file__).parent.parent.parent.parent
         self.config_file = project_root / "translator_config.json"
         self.last_session_file = project_root / "last_session.json"
         self.env_file = project_root / ".env"
 
+        openrouter = PROVIDERS['openrouter']
+
         self.default_config = {
-            "model": "deepseek/deepseek-v3.2-exp",
             "chunk_tokens": 7000,
             "temperature": 0.9,
             "max_tokens": 12000,
@@ -44,7 +34,7 @@ class ConfigManager:
             "top_p": 0.95,
             "top_k": 0,
             "timeout": 10.0,
-            "selected_providers": list(DEFAULT_PROVIDERS),
+            "selected_providers": list(openrouter.default_provider_order),
             "retries_per_provider": 2,
             "context_mode": True,
             "notes_mode": False,
@@ -59,8 +49,6 @@ class ConfigManager:
             "csv_chapters": "",
             "last_epub_path": "",
             "endpoint_type": "openrouter",
-            "custom_endpoint_model": "deepseek-ai/DeepSeek-V3.2-Exp",
-            "deepseek_model": "deepseek-v4-pro",
             "reasoning_enabled": False,
             "reasoning_effort": "medium",
             "reasoning_max_tokens": 0,
@@ -77,27 +65,24 @@ class ConfigManager:
             "context_filter_characters": False,
             "context_filter_places": True,
             "context_filter_terms": True,
-            "base_prompt_position": "bottom"
+            "base_prompt_position": "bottom",
         }
+
+        for provider in PROVIDERS.values():
+            if provider.model_config_key and provider.default_model:
+                self.default_config[provider.model_config_key] = provider.default_model
 
         self._env_vars: Dict[str, str] = {}
         self._load_env_file()
 
     def _load_env_file(self) -> None:
-        """Load environment variables from .env file.
-
-        Reads key=value pairs from .env file and stores them.
-        Falls back to system environment variables if .env doesn't exist.
-        """
         if self.env_file.exists():
             try:
                 with open(self.env_file, 'r', encoding='utf-8') as f:
                     for line in f:
                         line = line.strip()
-                        # Skip empty lines and comments
                         if not line or line.startswith('#'):
                             continue
-                        # Parse key=value pairs
                         if '=' in line:
                             key, value = line.split('=', 1)
                             self._env_vars[key.strip()] = value.strip()
@@ -111,24 +96,9 @@ class ConfigManager:
             )
 
     def get_api_key(self, key_name: str) -> str:
-        """Get API key from environment variables.
-
-        Args:
-            key_name: Name of the environment variable (e.g., 'OPENROUTER_API_KEY')
-
-        Returns:
-            API key value or empty string if not found
-        """
-        # Check loaded .env vars first, then fall back to system env vars
         return self._env_vars.get(key_name) or os.environ.get(key_name, "")
 
     def save_env_var(self, key_name: str, value: str) -> bool:
-        """Save or update a single key=value pair in .env, preserving everything else.
-
-        Comments, blank lines, and order of unrelated keys are preserved. If the key
-        is missing, it's appended. The in-memory cache is updated either way so
-        subsequent get_api_key calls see the new value without a reload.
-        """
         try:
             lines = []
             found = False
@@ -159,33 +129,32 @@ class ConfigManager:
             logger.error(f"Error saving env var {key_name}: {e}", exc_info=True)
             return False
 
-    def load_config(self) -> Dict[str, Any]:
-        """Load configuration from file with environment variable injection.
+    def _inject_provider_env(self, config: Dict[str, Any],
+                             file_config: Optional[Dict[str, Any]] = None) -> None:
+        """Inject API keys and endpoint URLs from environment into config."""
+        for provider in PROVIDERS.values():
+            if provider.api_key_env_var:
+                config[provider.api_key_config_key] = self.get_api_key(
+                    provider.api_key_env_var
+                )
+            if provider.endpoint_url_env_var and provider.url_config_key:
+                config[provider.url_config_key] = (
+                    self._env_vars.get(provider.endpoint_url_env_var)
+                    or (file_config or {}).get(
+                        provider.url_config_key, provider.default_base_url
+                    )
+                    or provider.default_base_url
+                )
 
-        Returns:
-            Configuration dictionary with API keys from environment
-        """
+    def load_config(self) -> Dict[str, Any]:
         try:
             if self.config_file.exists():
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
 
-                # Merge with default config to handle new settings
                 merged_config = self.default_config.copy()
                 merged_config.update(config)
-
-                # Inject API keys from environment
-                merged_config['api_key'] = self.get_api_key('OPENROUTER_API_KEY')
-                merged_config['custom_endpoint_url'] = (
-                    self._env_vars.get('CUSTOM_ENDPOINT_URL') or
-                    config.get('custom_endpoint_url', 'https://llm.chutes.ai/v1')
-                )
-                merged_config['custom_endpoint_key'] = self.get_api_key('CUSTOM_ENDPOINT_KEY')
-                merged_config['deepseek_endpoint_url'] = (
-                    self._env_vars.get('DEEPSEEK_ENDPOINT_URL') or
-                    config.get('deepseek_endpoint_url', DEEPSEEK_BASE_URL)
-                )
-                merged_config['deepseek_api_key'] = self.get_api_key('DEEPSEEK_API_KEY')
+                self._inject_provider_env(merged_config, file_config=config)
 
                 logger.info(f"Loaded configuration from {self.config_file}")
                 return merged_config
@@ -195,17 +164,7 @@ class ConfigManager:
                     "Using default configuration."
                 )
                 default = self.default_config.copy()
-                default['api_key'] = self.get_api_key('OPENROUTER_API_KEY')
-                default['custom_endpoint_url'] = self._env_vars.get(
-                    'CUSTOM_ENDPOINT_URL',
-                    'https://llm.chutes.ai/v1'
-                )
-                default['custom_endpoint_key'] = self.get_api_key('CUSTOM_ENDPOINT_KEY')
-                default['deepseek_endpoint_url'] = self._env_vars.get(
-                    'DEEPSEEK_ENDPOINT_URL',
-                    DEEPSEEK_BASE_URL
-                )
-                default['deepseek_api_key'] = self.get_api_key('DEEPSEEK_API_KEY')
+                self._inject_provider_env(default)
                 return default
 
         except json.JSONDecodeError as e:
@@ -216,52 +175,26 @@ class ConfigManager:
             return self._get_default_with_env()
 
     def _get_default_with_env(self) -> Dict[str, Any]:
-        """Get default config with environment variables injected."""
         default = self.default_config.copy()
-        default['api_key'] = self.get_api_key('OPENROUTER_API_KEY')
-        default['custom_endpoint_url'] = self._env_vars.get(
-            'CUSTOM_ENDPOINT_URL',
-            'https://llm.chutes.ai/v1'
-        )
-        default['custom_endpoint_key'] = self.get_api_key('CUSTOM_ENDPOINT_KEY')
-        default['deepseek_endpoint_url'] = self._env_vars.get(
-            'DEEPSEEK_ENDPOINT_URL',
-            DEEPSEEK_BASE_URL
-        )
-        default['deepseek_api_key'] = self.get_api_key('DEEPSEEK_API_KEY')
+        self._inject_provider_env(default)
         return default
 
     def save_config(self, config: Dict[str, Any]) -> bool:
-        """Save configuration to file. API keys are persisted to .env, not JSON.
-
-        Args:
-            config: Configuration dictionary to save
-
-        Returns:
-            True if save successful, False otherwise
-        """
         try:
-            # Persist API keys + endpoint URLs to .env so they survive restarts.
-            # We only update entries the user has actually filled in — empty
-            # strings are skipped so an accidentally-blank UI field doesn't wipe
-            # an existing key from .env.
-            env_updates = {
-                'OPENROUTER_API_KEY':   config.get('api_key', ''),
-                'CUSTOM_ENDPOINT_KEY':  config.get('custom_endpoint_key', ''),
-                'CUSTOM_ENDPOINT_URL':  config.get('custom_endpoint_url', ''),
-                'DEEPSEEK_API_KEY':     config.get('deepseek_api_key', ''),
-                'DEEPSEEK_ENDPOINT_URL': config.get('deepseek_endpoint_url', ''),
-            }
-            for env_key, env_value in env_updates.items():
-                if env_value:
-                    self.save_env_var(env_key, env_value)
+            for provider in PROVIDERS.values():
+                if provider.api_key_env_var:
+                    val = config.get(provider.api_key_config_key, '')
+                    if val:
+                        self.save_env_var(provider.api_key_env_var, val)
+                if provider.endpoint_url_env_var and provider.url_config_key:
+                    val = config.get(provider.url_config_key, '')
+                    if val:
+                        self.save_env_var(provider.endpoint_url_env_var, val)
 
-            # Create a copy and remove sensitive keys before writing JSON
             config_to_save = config.copy()
-            config_to_save.pop('api_key', None)
-            config_to_save.pop('custom_endpoint_key', None)
-            config_to_save.pop('deepseek_api_key', None)
-            # Keep custom_endpoint_url and deepseek_endpoint_url as they're not sensitive
+            for provider in PROVIDERS.values():
+                if provider.api_key_config_key:
+                    config_to_save.pop(provider.api_key_config_key, None)
 
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(config_to_save, f, indent=2, ensure_ascii=False)
@@ -277,14 +210,6 @@ class ConfigManager:
             return False
 
     def save_last_session(self, session_data: Dict[str, Any]) -> bool:
-        """Save last session data for continuation.
-
-        Args:
-            session_data: Session data dictionary
-
-        Returns:
-            True if save successful, False otherwise
-        """
         try:
             with open(self.last_session_file, 'w', encoding='utf-8') as f:
                 json.dump(session_data, f, indent=2, ensure_ascii=False)
@@ -295,11 +220,6 @@ class ConfigManager:
             return False
 
     def load_last_session(self) -> Optional[Dict[str, Any]]:
-        """Load last session data.
-
-        Returns:
-            Session data dictionary or None if not found
-        """
         try:
             if self.last_session_file.exists():
                 with open(self.last_session_file, 'r', encoding='utf-8') as f:
